@@ -93,6 +93,12 @@ export function parseSkillsQuery(raw: string): string | null {
       continue;
     }
 
+    // AND keyword → just a separator, skip it
+    if (tok.toUpperCase() === "AND") {
+      i++;
+      continue;
+    }
+
     // NOT keyword → negate the next token
     if (tok.toUpperCase() === "NOT" && i + 1 < rawTokens.length) {
       const next = rawTokens[i + 1];
