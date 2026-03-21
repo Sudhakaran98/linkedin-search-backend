@@ -1,16 +1,18 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import pool from "../lib/db.js";
+import linkedinPool from "../lib/linkedinDb.js";
 import {
   buildTsQuery,
   getSubsetOffset,
-  SUBSET_SIZE,
-  PAGE_SIZE,
+  SUBSET_SIZE_CONST,
+  PAGE_SIZE_CONST,
 } from "../lib/searchQuery.js";
 
 const router: IRouter = Router();
 
 // ---------------------------------------------------------------------------
 // GET /api/search/count
+// Returns total matching profiles and how many subsets they split into.
+// Call this first; use the returned values when calling /profiles.
 // ---------------------------------------------------------------------------
 router.get("/count", async (req: Request, res: Response) => {
   const { skills, designation } = req.query as {
@@ -34,25 +36,22 @@ router.get("/count", async (req: Request, res: Response) => {
   }
 
   try {
-    const result = await pool.query<{ total: string }>(
+    const result = await linkedinPool.query<{ total: string }>(
       `
       WITH q AS (
         SELECT to_tsquery('english', $1) AS tsq
-      ),
-      filtered AS (
-        SELECT ps.profile_id
-        FROM   linkedin.profile_search ps
-        WHERE  ps.tsv_search @@ (SELECT tsq FROM q)
       )
-      SELECT COUNT(profile_id) AS total FROM filtered
+      SELECT COUNT(ps.profile_id) AS total
+      FROM   linkedin.profile_search ps,  q
+      WHERE  ps.tsv_search @@ q.tsq
       `,
       [tsq]
     );
 
     const total   = parseInt(result.rows[0].total, 10);
-    const subsets = Math.ceil(total / SUBSET_SIZE);
+    const subsets = Math.ceil(total / SUBSET_SIZE_CONST);
 
-    res.json({ total, subsets, subsetSize: SUBSET_SIZE });
+    res.json({ total, subsets, subsetSize: SUBSET_SIZE_CONST });
   } catch (err) {
     req.log.error({ err }, "Search count error");
     res.status(500).json({ error: "Search failed" });
@@ -61,6 +60,8 @@ router.get("/count", async (req: Request, res: Response) => {
 
 // ---------------------------------------------------------------------------
 // GET /api/search/profiles
+// Returns a page of ranked profiles for the given subset.
+// Does NOT re-count — call /count first to get total/subsets.
 // ---------------------------------------------------------------------------
 router.get("/profiles", async (req: Request, res: Response) => {
   const { skills, designation } = req.query as {
@@ -83,58 +84,49 @@ router.get("/profiles", async (req: Request, res: Response) => {
     return;
   }
 
-  const subsetOffset = getSubsetOffset(subset);
-  const pageOffset   = (page - 1) * PAGE_SIZE;
+  const subsetOffset = getSubsetOffset(subset);           // subset * 1000
+  const pageOffset   = (page - 1) * PAGE_SIZE_CONST;     // (page-1) * 20
+  const totalPages   = Math.ceil(SUBSET_SIZE_CONST / PAGE_SIZE_CONST); // always 50
 
   try {
-    // --- total count ---
-    const countResult = await pool.query<{ total: string }>(
-      `
-      WITH q AS (SELECT to_tsquery('english', $1) AS tsq),
-      filtered AS (
-        SELECT ps.profile_id
-        FROM   linkedin.profile_search ps
-        WHERE  ps.tsv_search @@ (SELECT tsq FROM q)
-      )
-      SELECT COUNT(profile_id) AS total FROM filtered
-      `,
-      [tsq]
-    );
-    const total      = parseInt(countResult.rows[0].total, 10);
-    const subsets    = Math.ceil(total / SUBSET_SIZE);
-    const totalPages = Math.ceil(SUBSET_SIZE / PAGE_SIZE);
-
-    // --- ranked profiles ---
-    const profilesResult = await pool.query(
+    const profilesResult = await linkedinPool.query(
       `
       WITH q AS (
         SELECT to_tsquery('english', $1) AS tsq
       ),
+      -- Step 1: pull the 1 000-profile window for this subset
       filtered AS (
-        SELECT ps.profile_id
-        FROM   linkedin.profile_search ps
-        WHERE  ps.tsv_search @@ (SELECT tsq FROM q)
-        LIMIT  $2 OFFSET $3
+        SELECT   ps.profile_id
+        FROM     linkedin.profile_search ps,  q
+        WHERE    ps.tsv_search @@ q.tsq
+        ORDER BY ts_rank_cd(ps.tsv_search, q.tsq) DESC
+        LIMIT    $2  OFFSET $3
       ),
-      ranked_profiles AS (
+      -- Step 2: score each profile (LEFT JOIN so profiles with no
+      --         experience_text rows are NOT dropped; GROUP BY to
+      --         collapse the one-row-per-experience explosion)
+      scored AS (
         SELECT
           f.profile_id,
-          (
-            ts_rank_cd(ps.tsv_headline,                              (SELECT tsq FROM q)) * 1.0  +
-            ts_rank_cd(ps.tsv_active_experience_title,               (SELECT tsq FROM q)) * 0.9  +
-            ts_rank_cd('{0.0, 0.0, 0.0, 1.0}', et.tsv_title,        (SELECT tsq FROM q)) * 0.8  +
-            ts_rank_cd('{0.0, 0.0, 0.0, 1.0}', et.tsv_description,  (SELECT tsq FROM q)) * 0.8  +
-            ts_rank_cd(ps.tsv_summary,                               (SELECT tsq FROM q)) * 0.5  +
-            ts_rank_cd('{0.25, 0.5, 1.0, 0.0}', et.tsv_title,       (SELECT tsq FROM q)) * 0.4  +
-            ts_rank_cd('{0.25, 0.5, 1.0, 0.0}', et.tsv_description, (SELECT tsq FROM q)) * 0.4  +
-            ts_rank_cd(ps.tsv_skill,                                 (SELECT tsq FROM q)) * 0.2
+          MAX(
+            ts_rank_cd(ps.tsv_headline,                               q.tsq) * 1.0  +
+            ts_rank_cd(ps.tsv_active_experience_title,                q.tsq) * 0.9  +
+            COALESCE(ts_rank_cd('{0.0,0.0,0.0,1.0}', et.tsv_title,        q.tsq) * 0.8, 0) +
+            COALESCE(ts_rank_cd('{0.0,0.0,0.0,1.0}', et.tsv_description,  q.tsq) * 0.8, 0) +
+            ts_rank_cd(ps.tsv_summary,                                q.tsq) * 0.5  +
+            COALESCE(ts_rank_cd('{0.25,0.5,1.0,0.0}', et.tsv_title,       q.tsq) * 0.4, 0) +
+            COALESCE(ts_rank_cd('{0.25,0.5,1.0,0.0}', et.tsv_description, q.tsq) * 0.4, 0) +
+            ts_rank_cd(ps.tsv_skill,                                  q.tsq) * 0.2
           ) AS score
-        FROM filtered f
-        JOIN linkedin.profile_search ps  ON ps.profile_id = f.profile_id
-        JOIN linkedin.experience_text et ON et.profile_id = f.profile_id
-        ORDER BY score DESC
-        LIMIT $4 OFFSET $5
+        FROM   filtered f
+        JOIN   linkedin.profile_search ps  ON ps.profile_id  = f.profile_id
+        LEFT   JOIN linkedin.experience_text et ON et.profile_id = f.profile_id
+        CROSS  JOIN q
+        GROUP  BY f.profile_id
+        ORDER  BY score DESC
+        LIMIT  $4  OFFSET $5
       )
+      -- Step 3: hydrate with profile + active-experience columns
       SELECT
         p.id,
         p.full_name,
@@ -145,44 +137,36 @@ router.get("/profiles", async (req: Request, res: Response) => {
         p.location_country,
         p.active_experience_title,
         p.linkedin_url,
-        e.company_name        AS active_experience_company_name,
-        e.company_logo_url    AS active_experience_company_logo_url,
-        rp.score
-      FROM ranked_profiles rp
-      JOIN linkedin.profiles p ON p.id = rp.profile_id
-      LEFT JOIN linkedin.profile_experiences e
-        ON  e.profile_id        = p.id
-        AND e.active_experience  = true
-        AND e.order_in_profile   = 1
-      ORDER BY rp.score DESC
+        e.company_name       AS active_experience_company_name,
+        e.company_logo_url   AS active_experience_company_logo_url,
+        sc.score
+      FROM   scored sc
+      JOIN   linkedin.profiles p  ON p.id = sc.profile_id
+      LEFT   JOIN linkedin.profile_experiences e
+                ON  e.profile_id       = p.id
+               AND e.active_experience = true
+               AND e.order_in_profile  = 1
+      ORDER  BY sc.score DESC
       `,
-      [tsq, SUBSET_SIZE, subsetOffset, PAGE_SIZE, pageOffset]
+      [tsq, SUBSET_SIZE_CONST, subsetOffset, PAGE_SIZE_CONST, pageOffset]
     );
 
     const profiles = profilesResult.rows.map((row) => ({
       id:                                  String(row.id),
-      full_name:                           row.full_name ?? "",
-      headline:                            row.headline ?? undefined,
-      picture_url:                         row.picture_url ?? undefined,
-      location_full:                       row.location_full ?? undefined,
-      location_city:                       row.location_city ?? undefined,
-      location_country:                    row.location_country ?? undefined,
-      active_experience_title:             row.active_experience_title ?? undefined,
-      active_experience_company_name:      row.active_experience_company_name ?? undefined,
+      full_name:                           row.full_name                ?? "",
+      headline:                            row.headline                 ?? undefined,
+      picture_url:                         row.picture_url              ?? undefined,
+      location_full:                       row.location_full            ?? undefined,
+      location_city:                       row.location_city            ?? undefined,
+      location_country:                    row.location_country         ?? undefined,
+      active_experience_title:             row.active_experience_title  ?? undefined,
+      active_experience_company_name:      row.active_experience_company_name     ?? undefined,
       active_experience_company_logo_url:  row.active_experience_company_logo_url ?? undefined,
-      linkedin_url:                        row.linkedin_url ?? undefined,
+      linkedin_url:                        row.linkedin_url             ?? undefined,
       score:                               parseFloat(row.score) || 0,
     }));
 
-    res.json({
-      profiles,
-      total,
-      subsets,
-      subset,
-      page,
-      totalPages,
-      subsetSize: SUBSET_SIZE,
-    });
+    res.json({ profiles, subset, page, totalPages, subsetSize: SUBSET_SIZE_CONST });
   } catch (err) {
     req.log.error({ err }, "Search profiles error");
     res.status(500).json({ error: "Search failed" });
@@ -196,7 +180,7 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
   const { profileId } = req.params;
 
   try {
-    const profileResult = await pool.query(
+    const profileResult = await linkedinPool.query(
       `
       SELECT
         p.id, p.full_name, p.headline, p.picture_url,
@@ -218,7 +202,7 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
 
     const [experiencesResult, educationsResult, skillsResult] =
       await Promise.all([
-        pool.query(
+        linkedinPool.query(
           `
           SELECT
             id, position_title, company_name, company_logo_url, company_industry,
@@ -229,7 +213,7 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
           `,
           [profileId]
         ),
-        pool.query(
+        linkedinPool.query(
           `
           SELECT
             id, institution_name, institution_logo_url, degree, date_from_year, date_to_year
@@ -239,7 +223,7 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
           `,
           [profileId]
         ),
-        pool.query(
+        linkedinPool.query(
           `
           SELECT skill_name
           FROM   linkedin.profile_skills
@@ -254,17 +238,17 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
 
     res.json({
       id:                               String(row.id),
-      full_name:                        row.full_name ?? "",
-      headline:                         row.headline ?? undefined,
-      picture_url:                      row.picture_url ?? undefined,
-      location_full:                    row.location_full ?? undefined,
-      location_city:                    row.location_city ?? undefined,
-      location_country:                 row.location_country ?? undefined,
-      summary:                          row.summary ?? undefined,
-      linkedin_url:                     row.linkedin_url ?? undefined,
-      connections_count:                row.connections_count ?? undefined,
-      followers_count:                  row.followers_count ?? undefined,
-      active_experience_title:          row.active_experience_title ?? undefined,
+      full_name:                        row.full_name                       ?? "",
+      headline:                         row.headline                        ?? undefined,
+      picture_url:                      row.picture_url                     ?? undefined,
+      location_full:                    row.location_full                   ?? undefined,
+      location_city:                    row.location_city                   ?? undefined,
+      location_country:                 row.location_country                ?? undefined,
+      summary:                          row.summary                         ?? undefined,
+      linkedin_url:                     row.linkedin_url                    ?? undefined,
+      connections_count:                row.connections_count               ?? undefined,
+      followers_count:                  row.followers_count                 ?? undefined,
+      active_experience_title:          row.active_experience_title         ?? undefined,
       total_experience_duration_months: row.total_experience_duration_months ?? undefined,
       experiences: experiencesResult.rows.map((e) => ({
         id:                e.id,
