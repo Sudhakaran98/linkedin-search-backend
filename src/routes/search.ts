@@ -194,57 +194,103 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
       return;
     }
 
-    const [experiencesResult, educationsResult, skillsResult] =
-      await Promise.all([
-        linkedinPool.query(
-          `
-          SELECT
-            id, position_title, company_name, company_logo_url, company_industry,
-            location, date_from, date_to, description, active_experience, duration_months
-          FROM linkedin.profile_experiences
-          WHERE profile_id = $1
-          ORDER BY order_in_profile ASC
-          `,
-          [profileId]
-        ),
-        linkedinPool.query(
-          `
-          SELECT
-            id, institution_name, institution_logo_url, degree, date_from_year, date_to_year
-          FROM linkedin.profile_educations
-          WHERE profile_id = $1
-          ORDER BY order_in_profile ASC
-          `,
-          [profileId]
-        ),
-        linkedinPool.query(
-          `
-          SELECT skill_name
-          FROM   linkedin.profile_skills
-          WHERE  profile_id = $1
-          ORDER BY id ASC
-          `,
-          [profileId]
-        ),
-      ]);
+    // Helper: run a query and return [] on any error (table may not exist)
+    const safeQuery = async (sql: string, params: unknown[]) => {
+      try {
+        const r = await linkedinPool.query(sql, params);
+        return r.rows;
+      } catch {
+        return [];
+      }
+    };
+
+    const [
+      experiencesRows,
+      educationsRows,
+      skillsRows,
+      certificationsRows,
+      honorsRows,
+      publicationsRows,
+      patentsRows,
+      volunteeringRows,
+      languagesRows,
+      projectsRows,
+      coursesRows,
+    ] = await Promise.all([
+      linkedinPool.query(
+        `SELECT id, position_title, company_name, company_logo_url, company_industry,
+                location, date_from, date_to, description, active_experience, duration_months
+         FROM linkedin.profile_experiences WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        [profileId]
+      ).then(r => r.rows),
+      linkedinPool.query(
+        `SELECT id, institution_name, institution_logo_url, degree, date_from_year, date_to_year
+         FROM linkedin.profile_educations WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        [profileId]
+      ).then(r => r.rows),
+      linkedinPool.query(
+        `SELECT skill_name FROM linkedin.profile_skills WHERE profile_id = $1 ORDER BY id ASC`,
+        [profileId]
+      ).then(r => r.rows),
+      safeQuery(
+        `SELECT id, certification_name, authority, license_number, url, date_from, date_to
+         FROM linkedin.profile_certifications WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        [profileId]
+      ),
+      safeQuery(
+        `SELECT id, title, issuer, date, description
+         FROM linkedin.profile_honors WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        [profileId]
+      ),
+      safeQuery(
+        `SELECT id, title, publisher, date, description, url
+         FROM linkedin.profile_publications WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        [profileId]
+      ),
+      safeQuery(
+        `SELECT id, title, status, number, date, description, url
+         FROM linkedin.profile_patents WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        [profileId]
+      ),
+      safeQuery(
+        `SELECT id, role, company_name, cause, date_from, date_to, description
+         FROM linkedin.profile_volunteering WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        [profileId]
+      ),
+      safeQuery(
+        `SELECT id, language_name, proficiency
+         FROM linkedin.profile_languages WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        [profileId]
+      ),
+      safeQuery(
+        `SELECT id, title, date_from, date_to, description, url
+         FROM linkedin.profile_projects WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        [profileId]
+      ),
+      safeQuery(
+        `SELECT id, course_name, number
+         FROM linkedin.profile_courses WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        [profileId]
+      ),
+    ]);
 
     const row = profileResult.rows[0];
 
     res.json({
       id:                               String(row.id),
-      full_name:                        row.full_name                       ?? "",
-      headline:                         row.headline                        ?? undefined,
-      picture_url:                      row.picture_url                     ?? undefined,
-      location_full:                    row.location_full                   ?? undefined,
-      location_city:                    row.location_city                   ?? undefined,
-      location_country:                 row.location_country                ?? undefined,
-      summary:                          row.summary                         ?? undefined,
-      linkedin_url:                     row.linkedin_url                    ?? undefined,
-      connections_count:                row.connections_count               ?? undefined,
-      followers_count:                  row.followers_count                 ?? undefined,
-      active_experience_title:          row.active_experience_title         ?? undefined,
+      full_name:                        row.full_name                        ?? "",
+      headline:                         row.headline                         ?? undefined,
+      picture_url:                      row.picture_url                      ?? undefined,
+      location_full:                    row.location_full                    ?? undefined,
+      location_city:                    row.location_city                    ?? undefined,
+      location_country:                 row.location_country                 ?? undefined,
+      summary:                          row.summary                          ?? undefined,
+      linkedin_url:                     row.linkedin_url                     ?? undefined,
+      connections_count:                row.connections_count                ?? undefined,
+      followers_count:                  row.followers_count                  ?? undefined,
+      active_experience_title:          row.active_experience_title          ?? undefined,
       total_experience_duration_months: row.total_experience_duration_months ?? undefined,
-      experiences: experiencesResult.rows.map((e) => ({
+      experiences: experiencesRows.map((e) => ({
         id:                e.id,
         position_title:    e.position_title    ?? undefined,
         company_name:      e.company_name      ?? undefined,
@@ -257,7 +303,7 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
         active_experience: e.active_experience ?? undefined,
         duration_months:   e.duration_months   ?? undefined,
       })),
-      educations: educationsResult.rows.map((e) => ({
+      educations: educationsRows.map((e) => ({
         id:                   e.id,
         institution_name:     e.institution_name     ?? undefined,
         institution_logo_url: e.institution_logo_url ?? undefined,
@@ -265,8 +311,66 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
         date_from_year:       e.date_from_year       ?? undefined,
         date_to_year:         e.date_to_year         ?? undefined,
       })),
-      skills: skillsResult.rows.map((s) => ({
-        skill_name: s.skill_name ?? undefined,
+      skills: skillsRows.map((s) => ({ skill_name: s.skill_name ?? undefined })),
+      certifications: certificationsRows.map((c) => ({
+        id:               c.id,
+        certification_name: c.certification_name ?? undefined,
+        authority:        c.authority        ?? undefined,
+        license_number:   c.license_number   ?? undefined,
+        url:              c.url              ?? undefined,
+        date_from:        c.date_from        ?? undefined,
+        date_to:          c.date_to          ?? undefined,
+      })),
+      honors: honorsRows.map((h) => ({
+        id:          h.id,
+        title:       h.title       ?? undefined,
+        issuer:      h.issuer      ?? undefined,
+        date:        h.date        ?? undefined,
+        description: h.description ?? undefined,
+      })),
+      publications: publicationsRows.map((p) => ({
+        id:          p.id,
+        title:       p.title       ?? undefined,
+        publisher:   p.publisher   ?? undefined,
+        date:        p.date        ?? undefined,
+        description: p.description ?? undefined,
+        url:         p.url         ?? undefined,
+      })),
+      patents: patentsRows.map((p) => ({
+        id:          p.id,
+        title:       p.title       ?? undefined,
+        status:      p.status      ?? undefined,
+        number:      p.number      ?? undefined,
+        date:        p.date        ?? undefined,
+        description: p.description ?? undefined,
+        url:         p.url         ?? undefined,
+      })),
+      volunteering: volunteeringRows.map((v) => ({
+        id:           v.id,
+        role:         v.role         ?? undefined,
+        company_name: v.company_name ?? undefined,
+        cause:        v.cause        ?? undefined,
+        date_from:    v.date_from    ?? undefined,
+        date_to:      v.date_to      ?? undefined,
+        description:  v.description  ?? undefined,
+      })),
+      languages: languagesRows.map((l) => ({
+        id:            l.id,
+        language_name: l.language_name ?? undefined,
+        proficiency:   l.proficiency   ?? undefined,
+      })),
+      projects: projectsRows.map((p) => ({
+        id:          p.id,
+        title:       p.title       ?? undefined,
+        date_from:   p.date_from   ?? undefined,
+        date_to:     p.date_to     ?? undefined,
+        description: p.description ?? undefined,
+        url:         p.url         ?? undefined,
+      })),
+      courses: coursesRows.map((c) => ({
+        id:          c.id,
+        course_name: c.course_name ?? undefined,
+        number:      c.number      ?? undefined,
       })),
     });
   } catch (err) {
