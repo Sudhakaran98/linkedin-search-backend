@@ -9,6 +9,16 @@ import {
 
 const router: IRouter = Router();
 
+async function estimateSearchCount(tsq: string): Promise<number> {
+  const result = await linkedinPool.query<{ total: number | string | null }>(
+    `SELECT count_estimate_tsv($1) AS total`,
+    [tsq]
+  );
+
+  const estimatedTotal = result.rows[0]?.total;
+  return Math.max(0, Number(estimatedTotal) || 0);
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/search/count
 // Returns total matching profiles and how many subsets they split into.
@@ -36,19 +46,7 @@ router.get("/count", async (req: Request, res: Response) => {
   }
 
   try {
-    const result = await linkedinPool.query<{ total: string }>(
-      `
-      WITH q AS (
-        SELECT to_tsquery('english', $1) AS tsq
-      )
-      SELECT COUNT(ps.profile_id) AS total
-      FROM   linkedin.profile_search ps,  q
-      WHERE  ps.tsv_search @@ q.tsq
-      `,
-      [tsq]
-    );
-
-    const total   = parseInt(result.rows[0].total, 10);
+    const total = await estimateSearchCount(tsq);
     const subsets = Math.ceil(total / SUBSET_SIZE);
 
     res.json({ total, subsets, subsetSize: SUBSET_SIZE });
@@ -86,9 +84,13 @@ router.get("/profiles", async (req: Request, res: Response) => {
 
   const subsetOffset = getSubsetOffset(subset);                    // subset * 1000
   const pageOffset   = (page - 1) * PAGE_SIZE;                    // (page-1) * 20
-  const totalPages   = Math.ceil(SUBSET_SIZE / PAGE_SIZE);        // 1000 / 20 = 50
 
   try {
+    const total = await estimateSearchCount(tsq);
+    const subsets = Math.ceil(total / SUBSET_SIZE);
+    const profilesInSubset = Math.max(0, Math.min(SUBSET_SIZE, total - subsetOffset));
+    const totalPages = profilesInSubset > 0 ? Math.ceil(profilesInSubset / PAGE_SIZE) : 0;
+
     const profilesResult = await linkedinPool.query(
       `
       WITH q AS (
@@ -160,7 +162,15 @@ router.get("/profiles", async (req: Request, res: Response) => {
       score:                               parseFloat(row.score) || 0,
     }));
 
-    res.json({ profiles, subset, page, totalPages, subsetSize: SUBSET_SIZE });
+    res.json({
+      profiles,
+      total,
+      subsets,
+      subset,
+      page,
+      totalPages,
+      subsetSize: SUBSET_SIZE,
+    });
   } catch (err) {
     req.log.error({ err }, "Search profiles error");
     res.status(500).json({ error: "Search failed" });
