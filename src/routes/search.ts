@@ -9,6 +9,16 @@ import {
 
 const router: IRouter = Router();
 
+async function estimateSearchCount(tsq: string): Promise<number> {
+  const result = await linkedinPool.query<{ total: number | string | null }>(
+    `SELECT count_estimate_tsv($1) AS total`,
+    [tsq]
+  );
+
+  const estimatedTotal = result.rows[0]?.total;
+  return Math.max(0, Number(estimatedTotal) || 0);
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/search/count
 // Returns total matching profiles and how many subsets they split into.
@@ -36,19 +46,7 @@ router.get("/count", async (req: Request, res: Response) => {
   }
 
   try {
-    const result = await linkedinPool.query<{ total: string }>(
-      `
-      WITH q AS (
-        SELECT to_tsquery('english', $1) AS tsq
-      )
-      SELECT COUNT(ps.profile_id) AS total
-      FROM   linkedin.profile_search ps,  q
-      WHERE  ps.tsv_search @@ q.tsq
-      `,
-      [tsq]
-    );
-
-    const total   = parseInt(result.rows[0].total, 10);
+    const total = await estimateSearchCount(tsq);
     const subsets = Math.ceil(total / SUBSET_SIZE);
 
     res.json({ total, subsets, subsetSize: SUBSET_SIZE });
@@ -86,11 +84,14 @@ router.get("/profiles", async (req: Request, res: Response) => {
 
   const subsetOffset = getSubsetOffset(subset);                    // subset * 1000
   const pageOffset   = (page - 1) * PAGE_SIZE;                    // (page-1) * 20
-  const totalPages   = Math.ceil(SUBSET_SIZE / PAGE_SIZE);        // 1000 / 20 = 50
 
   try {
-    const profilesResult = await linkedinPool.query(
-      `
+    const total = await estimateSearchCount(tsq);
+    const subsets = Math.ceil(total / SUBSET_SIZE);
+    const profilesInSubset = Math.max(0, Math.min(SUBSET_SIZE, total - subsetOffset));
+    const totalPages = profilesInSubset > 0 ? Math.ceil(profilesInSubset / PAGE_SIZE) : 0;
+
+    const profilesQuery = `
       WITH q AS (
         SELECT to_tsquery('english', $1) AS tsq
       ),
@@ -141,9 +142,21 @@ router.get("/profiles", async (req: Request, res: Response) => {
                AND e.active_experience = true
                AND e.order_in_profile  = 1
       ORDER  BY sc.score DESC
-      `,
-      [tsq, SUBSET_SIZE, subsetOffset, PAGE_SIZE, pageOffset]
-    );
+      `;
+    const profilesQueryParams = [tsq, SUBSET_SIZE, subsetOffset, PAGE_SIZE, pageOffset];
+
+    console.log("/api/search/profiles query", {
+      inputs: {
+        skills: skills ?? null,
+        designation: designation ?? null,
+        subset,
+        page,
+      },
+      query: profilesQuery,
+      params: profilesQueryParams,
+    });
+
+    const profilesResult = await linkedinPool.query(profilesQuery, profilesQueryParams);
 
     const profiles = profilesResult.rows.map((row) => ({
       id:                                  String(row.id),
@@ -160,7 +173,15 @@ router.get("/profiles", async (req: Request, res: Response) => {
       score:                               parseFloat(row.score) || 0,
     }));
 
-    res.json({ profiles, subset, page, totalPages, subsetSize: SUBSET_SIZE });
+    res.json({
+      profiles,
+      total,
+      subsets,
+      subset,
+      page,
+      totalPages,
+      subsetSize: SUBSET_SIZE,
+    });
   } catch (err) {
     req.log.error({ err }, "Search profiles error");
     res.status(500).json({ error: "Search failed" });
@@ -209,52 +230,53 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
       educationsRows,
       skillsRows,
       certificationsRows,
-      honorsRows,
+      awardsRows,
       publicationsRows,
       patentsRows,
-      volunteeringRows,
       languagesRows,
       projectsRows,
       coursesRows,
+      organizationsRows,
     ] = await Promise.all([
-      linkedinPool.query(
+      safeQuery(
         `SELECT id, position_title, company_name, company_logo_url, company_industry,
-                location, date_from, date_to, description, active_experience, duration_months
+                location, date_from, date_to, date_from_year, date_from_month,
+                date_to_year, date_to_month, description, active_experience, duration_months,
+                department, management_level
          FROM linkedin.profile_experiences WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
         [profileId]
-      ).then(r => r.rows),
-      linkedinPool.query(
-        `SELECT id, institution_name, institution_logo_url, degree, date_from_year, date_to_year
+      ),
+      safeQuery(
+        `SELECT id, institution_name, institution_logo_url, institution_url, degree,
+                date_from_year, date_to_year, description, activities_and_societies
          FROM linkedin.profile_educations WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
         [profileId]
-      ).then(r => r.rows),
-      linkedinPool.query(
-        `SELECT skill_name FROM linkedin.profile_skills WHERE profile_id = $1 ORDER BY id ASC`,
-        [profileId]
-      ).then(r => r.rows),
+      ),
       safeQuery(
-        `SELECT id, certification_name, authority, license_number, url, date_from, date_to
+        `SELECT id, skill_name, is_inferred
+         FROM linkedin.profile_skills WHERE profile_id = $1 ORDER BY id ASC`,
+        [profileId]
+      ),
+      safeQuery(
+        `SELECT id, title, issuer, issuer_url, credential_id, certificate_url,
+                certificate_logo_url, date_from, date_from_year, date_from_month,
+                date_to, date_to_year, date_to_month
          FROM linkedin.profile_certifications WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
         [profileId]
       ),
       safeQuery(
-        `SELECT id, title, issuer, date, description
-         FROM linkedin.profile_honors WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        `SELECT id, award_title, issuer, description, award_date, date_year, date_month
+         FROM linkedin.profile_awards WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
         [profileId]
       ),
       safeQuery(
-        `SELECT id, title, publisher, date, description, url
+        `SELECT id, title, description, publication_url, publication_names, date, date_year, date_month
          FROM linkedin.profile_publications WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
         [profileId]
       ),
       safeQuery(
-        `SELECT id, title, status, number, date, description, url
+        `SELECT id, title, description, patent_url, patent_number, status, date, date_year, date_month
          FROM linkedin.profile_patents WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
-        [profileId]
-      ),
-      safeQuery(
-        `SELECT id, role, company_name, cause, date_from, date_to, description
-         FROM linkedin.profile_volunteering WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
         [profileId]
       ),
       safeQuery(
@@ -263,13 +285,20 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
         [profileId]
       ),
       safeQuery(
-        `SELECT id, title, date_from, date_to, description, url
+        `SELECT id, name, description, project_url, date_from, date_from_year, date_from_month,
+                date_to, date_to_year, date_to_month
          FROM linkedin.profile_projects WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
         [profileId]
       ),
       safeQuery(
-        `SELECT id, course_name, number
+        `SELECT id, organizer, title
          FROM linkedin.profile_courses WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
+        [profileId]
+      ),
+      safeQuery(
+        `SELECT id, organization_name, position, description, date_from, date_from_year,
+                date_from_month, date_to, date_to_year, date_to_month
+         FROM linkedin.profile_organizations WHERE profile_id = $1 ORDER BY order_in_profile ASC`,
         [profileId]
       ),
     ]);
@@ -298,61 +327,77 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
         company_industry:  e.company_industry  ?? undefined,
         location:          e.location          ?? undefined,
         date_from:         e.date_from         ?? undefined,
+        date_from_year:    e.date_from_year    ?? undefined,
+        date_from_month:   e.date_from_month   ?? undefined,
         date_to:           e.date_to           ?? undefined,
+        date_to_year:      e.date_to_year      ?? undefined,
+        date_to_month:     e.date_to_month     ?? undefined,
         description:       e.description       ?? undefined,
         active_experience: e.active_experience ?? undefined,
         duration_months:   e.duration_months   ?? undefined,
+        department:        e.department        ?? undefined,
+        management_level:  e.management_level  ?? undefined,
       })),
       educations: educationsRows.map((e) => ({
-        id:                   e.id,
-        institution_name:     e.institution_name     ?? undefined,
-        institution_logo_url: e.institution_logo_url ?? undefined,
-        degree:               e.degree               ?? undefined,
-        date_from_year:       e.date_from_year       ?? undefined,
-        date_to_year:         e.date_to_year         ?? undefined,
+        id:                      e.id,
+        institution_name:        e.institution_name        ?? undefined,
+        institution_logo_url:    e.institution_logo_url    ?? undefined,
+        institution_url:         e.institution_url         ?? undefined,
+        degree:                  e.degree                  ?? undefined,
+        date_from_year:          e.date_from_year          ?? undefined,
+        date_to_year:            e.date_to_year            ?? undefined,
+        description:             e.description             ?? undefined,
+        activities_and_societies: e.activities_and_societies ?? undefined,
       })),
-      skills: skillsRows.map((s) => ({ skill_name: s.skill_name ?? undefined })),
+      skills: skillsRows.map((s) => ({
+        id:          s.id,
+        skill_name:  s.skill_name  ?? undefined,
+        is_inferred: s.is_inferred ?? undefined,
+      })),
       certifications: certificationsRows.map((c) => ({
-        id:               c.id,
-        certification_name: c.certification_name ?? undefined,
-        authority:        c.authority        ?? undefined,
-        license_number:   c.license_number   ?? undefined,
-        url:              c.url              ?? undefined,
-        date_from:        c.date_from        ?? undefined,
-        date_to:          c.date_to          ?? undefined,
+        id:                   c.id,
+        title:                c.title                ?? undefined,
+        issuer:               c.issuer               ?? undefined,
+        issuer_url:           c.issuer_url           ?? undefined,
+        credential_id:        c.credential_id        ?? undefined,
+        certificate_url:      c.certificate_url      ?? undefined,
+        certificate_logo_url: c.certificate_logo_url ?? undefined,
+        date_from:            c.date_from            ?? undefined,
+        date_from_year:       c.date_from_year       ?? undefined,
+        date_from_month:      c.date_from_month      ?? undefined,
+        date_to:              c.date_to              ?? undefined,
+        date_to_year:         c.date_to_year         ?? undefined,
+        date_to_month:        c.date_to_month        ?? undefined,
       })),
-      honors: honorsRows.map((h) => ({
-        id:          h.id,
-        title:       h.title       ?? undefined,
-        issuer:      h.issuer      ?? undefined,
-        date:        h.date        ?? undefined,
-        description: h.description ?? undefined,
+      awards: awardsRows.map((a) => ({
+        id:          a.id,
+        award_title: a.award_title ?? undefined,
+        issuer:      a.issuer      ?? undefined,
+        description: a.description ?? undefined,
+        award_date:  a.award_date  ?? undefined,
+        date_year:   a.date_year   ?? undefined,
+        date_month:  a.date_month  ?? undefined,
       })),
       publications: publicationsRows.map((p) => ({
-        id:          p.id,
-        title:       p.title       ?? undefined,
-        publisher:   p.publisher   ?? undefined,
-        date:        p.date        ?? undefined,
-        description: p.description ?? undefined,
-        url:         p.url         ?? undefined,
+        id:                p.id,
+        title:             p.title             ?? undefined,
+        description:       p.description       ?? undefined,
+        publication_url:   p.publication_url   ?? undefined,
+        publication_names: p.publication_names ?? undefined,
+        date:              p.date              ?? undefined,
+        date_year:         p.date_year         ?? undefined,
+        date_month:        p.date_month        ?? undefined,
       })),
       patents: patentsRows.map((p) => ({
-        id:          p.id,
-        title:       p.title       ?? undefined,
-        status:      p.status      ?? undefined,
-        number:      p.number      ?? undefined,
-        date:        p.date        ?? undefined,
-        description: p.description ?? undefined,
-        url:         p.url         ?? undefined,
-      })),
-      volunteering: volunteeringRows.map((v) => ({
-        id:           v.id,
-        role:         v.role         ?? undefined,
-        company_name: v.company_name ?? undefined,
-        cause:        v.cause        ?? undefined,
-        date_from:    v.date_from    ?? undefined,
-        date_to:      v.date_to      ?? undefined,
-        description:  v.description  ?? undefined,
+        id:            p.id,
+        title:         p.title         ?? undefined,
+        description:   p.description   ?? undefined,
+        patent_url:    p.patent_url    ?? undefined,
+        patent_number: p.patent_number ?? undefined,
+        status:        p.status        ?? undefined,
+        date:          p.date          ?? undefined,
+        date_year:     p.date_year     ?? undefined,
+        date_month:    p.date_month    ?? undefined,
       })),
       languages: languagesRows.map((l) => ({
         id:            l.id,
@@ -360,17 +405,33 @@ router.get("/profile/:profileId", async (req: Request, res: Response) => {
         proficiency:   l.proficiency   ?? undefined,
       })),
       projects: projectsRows.map((p) => ({
-        id:          p.id,
-        title:       p.title       ?? undefined,
-        date_from:   p.date_from   ?? undefined,
-        date_to:     p.date_to     ?? undefined,
-        description: p.description ?? undefined,
-        url:         p.url         ?? undefined,
+        id:              p.id,
+        name:            p.name            ?? undefined,
+        description:     p.description     ?? undefined,
+        project_url:     p.project_url     ?? undefined,
+        date_from:       p.date_from       ?? undefined,
+        date_from_year:  p.date_from_year  ?? undefined,
+        date_from_month: p.date_from_month ?? undefined,
+        date_to:         p.date_to         ?? undefined,
+        date_to_year:    p.date_to_year    ?? undefined,
+        date_to_month:   p.date_to_month   ?? undefined,
       })),
       courses: coursesRows.map((c) => ({
-        id:          c.id,
-        course_name: c.course_name ?? undefined,
-        number:      c.number      ?? undefined,
+        id:        c.id,
+        organizer: c.organizer ?? undefined,
+        title:     c.title     ?? undefined,
+      })),
+      organizations: organizationsRows.map((o) => ({
+        id:                o.id,
+        organization_name: o.organization_name ?? undefined,
+        position:          o.position          ?? undefined,
+        description:       o.description       ?? undefined,
+        date_from:         o.date_from         ?? undefined,
+        date_from_year:    o.date_from_year    ?? undefined,
+        date_from_month:   o.date_from_month   ?? undefined,
+        date_to:           o.date_to           ?? undefined,
+        date_to_year:      o.date_to_year      ?? undefined,
+        date_to_month:     o.date_to_month     ?? undefined,
       })),
     });
   } catch (err) {
