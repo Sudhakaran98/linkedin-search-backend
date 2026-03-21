@@ -3,8 +3,8 @@ import linkedinPool from "../lib/linkedinDb.js";
 import {
   buildTsQuery,
   getSubsetOffset,
-  SUBSET_SIZE_CONST,
-  PAGE_SIZE_CONST,
+  SUBSET_SIZE,
+  PAGE_SIZE,
 } from "../lib/searchQuery.js";
 
 const router: IRouter = Router();
@@ -49,9 +49,9 @@ router.get("/count", async (req: Request, res: Response) => {
     );
 
     const total   = parseInt(result.rows[0].total, 10);
-    const subsets = Math.ceil(total / SUBSET_SIZE_CONST);
+    const subsets = Math.ceil(total / SUBSET_SIZE);
 
-    res.json({ total, subsets, subsetSize: SUBSET_SIZE_CONST });
+    res.json({ total, subsets, subsetSize: SUBSET_SIZE });
   } catch (err) {
     req.log.error({ err }, "Search count error");
     res.status(500).json({ error: "Search failed" });
@@ -84,9 +84,9 @@ router.get("/profiles", async (req: Request, res: Response) => {
     return;
   }
 
-  const subsetOffset = getSubsetOffset(subset);           // subset * 1000
-  const pageOffset   = (page - 1) * PAGE_SIZE_CONST;     // (page-1) * 20
-  const totalPages   = Math.ceil(SUBSET_SIZE_CONST / PAGE_SIZE_CONST); // always 50
+  const subsetOffset = getSubsetOffset(subset);                    // subset * 1000
+  const pageOffset   = (page - 1) * PAGE_SIZE;                    // (page-1) * 20
+  const totalPages   = Math.ceil(SUBSET_SIZE / PAGE_SIZE);        // 1000 / 20 = 50
 
   try {
     const profilesResult = await linkedinPool.query(
@@ -142,7 +142,7 @@ router.get("/profiles", async (req: Request, res: Response) => {
                AND e.order_in_profile  = 1
       ORDER  BY sc.score DESC
       `,
-      [tsq, SUBSET_SIZE_CONST, subsetOffset, PAGE_SIZE_CONST, pageOffset]
+      [tsq, SUBSET_SIZE, subsetOffset, PAGE_SIZE, pageOffset]
     );
 
     const profiles = profilesResult.rows.map((row) => ({
@@ -160,7 +160,7 @@ router.get("/profiles", async (req: Request, res: Response) => {
       score:                               parseFloat(row.score) || 0,
     }));
 
-    res.json({ profiles, subset, page, totalPages, subsetSize: SUBSET_SIZE_CONST });
+    res.json({ profiles, subset, page, totalPages, subsetSize: SUBSET_SIZE });
   } catch (err) {
     req.log.error({ err }, "Search profiles error");
     res.status(500).json({ error: "Search failed" });
