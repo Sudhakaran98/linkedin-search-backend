@@ -100,7 +100,6 @@ router.get("/profiles", async (req: Request, res: Response) => {
         SELECT   ps.profile_id
         FROM     linkedin.profile_search ps,  q
         WHERE    ps.tsv_search @@ q.tsq
-        ORDER BY ts_rank_cd(ps.tsv_search, q.tsq) DESC
         LIMIT    $2  OFFSET $3
       ),
       -- Step 2: score each profile using columns on profile_search directly
