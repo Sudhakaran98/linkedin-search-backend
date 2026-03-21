@@ -91,8 +91,7 @@ router.get("/profiles", async (req: Request, res: Response) => {
     const profilesInSubset = Math.max(0, Math.min(SUBSET_SIZE, total - subsetOffset));
     const totalPages = profilesInSubset > 0 ? Math.ceil(profilesInSubset / PAGE_SIZE) : 0;
 
-    const profilesResult = await linkedinPool.query(
-      `
+    const profilesQuery = `
       WITH q AS (
         SELECT to_tsquery('english', $1) AS tsq
       ),
@@ -143,9 +142,21 @@ router.get("/profiles", async (req: Request, res: Response) => {
                AND e.active_experience = true
                AND e.order_in_profile  = 1
       ORDER  BY sc.score DESC
-      `,
-      [tsq, SUBSET_SIZE, subsetOffset, PAGE_SIZE, pageOffset]
-    );
+      `;
+    const profilesQueryParams = [tsq, SUBSET_SIZE, subsetOffset, PAGE_SIZE, pageOffset];
+
+    console.log("/api/search/profiles query", {
+      inputs: {
+        skills: skills ?? null,
+        designation: designation ?? null,
+        subset,
+        page,
+      },
+      query: profilesQuery,
+      params: profilesQueryParams,
+    });
+
+    const profilesResult = await linkedinPool.query(profilesQuery, profilesQueryParams);
 
     const profiles = profilesResult.rows.map((row) => ({
       id:                                  String(row.id),
