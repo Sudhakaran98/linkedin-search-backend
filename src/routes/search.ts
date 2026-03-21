@@ -1,5 +1,5 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import linkedinPool from "../lib/linkedinDb.js";
+import linkedinPool from "../lib/db.js";
 import {
   buildTsQuery,
   getSubsetOffset,
