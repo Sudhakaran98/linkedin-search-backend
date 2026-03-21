@@ -102,27 +102,21 @@ router.get("/profiles", async (req: Request, res: Response) => {
         ORDER BY ts_rank_cd(ps.tsv_search, q.tsq) DESC
         LIMIT    $2  OFFSET $3
       ),
-      -- Step 2: score each profile (LEFT JOIN so profiles with no
-      --         experience_text rows are NOT dropped; GROUP BY to
-      --         collapse the one-row-per-experience explosion)
+      -- Step 2: score each profile using columns on profile_search directly
       scored AS (
         SELECT
           f.profile_id,
-          MAX(
-            ts_rank_cd(ps.tsv_headline,                               q.tsq) * 1.0  +
-            ts_rank_cd(ps.tsv_active_experience_title,                q.tsq) * 0.9  +
-            COALESCE(ts_rank_cd('{0.0,0.0,0.0,1.0}', et.tsv_title,        q.tsq) * 0.8, 0) +
-            COALESCE(ts_rank_cd('{0.0,0.0,0.0,1.0}', et.tsv_description,  q.tsq) * 0.8, 0) +
-            ts_rank_cd(ps.tsv_summary,                                q.tsq) * 0.5  +
-            COALESCE(ts_rank_cd('{0.25,0.5,1.0,0.0}', et.tsv_title,       q.tsq) * 0.4, 0) +
-            COALESCE(ts_rank_cd('{0.25,0.5,1.0,0.0}', et.tsv_description, q.tsq) * 0.4, 0) +
-            ts_rank_cd(ps.tsv_skill,                                  q.tsq) * 0.2
+          (
+            ts_rank_cd(ps.tsv_headline,                  q.tsq) * 1.0 +
+            ts_rank_cd(ps.tsv_active_experience_title,   q.tsq) * 0.9 +
+            ts_rank_cd(ps.tsv_experience_title,          q.tsq) * 0.8 +
+            ts_rank_cd(ps.tsv_experience_description,    q.tsq) * 0.7 +
+            ts_rank_cd(ps.tsv_summary,                   q.tsq) * 0.5 +
+            ts_rank_cd(ps.tsv_skill,                     q.tsq) * 0.2
           ) AS score
         FROM   filtered f
-        JOIN   linkedin.profile_search ps  ON ps.profile_id  = f.profile_id
-        LEFT   JOIN linkedin.experience_text et ON et.profile_id = f.profile_id
+        JOIN   linkedin.profile_search ps ON ps.profile_id = f.profile_id
         CROSS  JOIN q
-        GROUP  BY f.profile_id
         ORDER  BY score DESC
         LIMIT  $4  OFFSET $5
       )
