@@ -11,7 +11,7 @@ const router: IRouter = Router();
 
 async function estimateSearchCount(tsq: string): Promise<number> {
   const result = await linkedinPool.query<{ total: number | string | null }>(
-    `SELECT count_estimate_tsv($1) AS total`,
+    `SELECT linkedin.count_estimate_tsv($1) AS total`,
     [tsq]
   );
 
