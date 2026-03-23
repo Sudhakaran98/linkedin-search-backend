@@ -1,26 +1,33 @@
-import express, { type Express, type Request, type Response } from "express";
+import { randomUUID } from "node:crypto";
+import express, { type Express } from "express";
 import cors from "cors";
-import { pinoHttp, type ReqId } from "pino-http";
 import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 
 const app: Express = express();
 
-type RequestWithId = Request & { id?: ReqId };
+app.use((req, res, next) => {
+  const requestId = randomUUID();
+  const startedAt = Date.now();
 
-app.use(
-  pinoHttp({
-    logger,
-    serializers: {
-      req(req: RequestWithId) {
-        return { id: req.id, method: req.method, url: req.url?.split("?")[0] };
+  req.log = logger.child({
+    requestId,
+    method: req.method,
+    path: req.originalUrl.split("?")[0],
+  });
+
+  res.on("finish", () => {
+    req.log.info(
+      {
+        statusCode: res.statusCode,
+        durationMs: Date.now() - startedAt,
       },
-      res(res: Response) {
-        return { statusCode: res.statusCode };
-      },
-    },
-  })
-);
+      "Request completed"
+    );
+  });
+
+  next();
+});
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
