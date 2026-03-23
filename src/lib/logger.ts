@@ -88,14 +88,17 @@ class ConsoleLogger implements AppLogger {
       return;
     }
 
+    const contextPayload: LogContext =
+      typeof context === "object" && context !== null
+        ? (sanitize(context) as LogContext)
+        : { value: sanitize(context) };
+
     const payload = {
       time: new Date().toISOString(),
       level,
       msg: message,
       ...this.bindings,
-      ...(typeof context === "object" && context !== null
-        ? sanitize(context)
-        : { value: sanitize(context) }),
+      ...contextPayload,
     };
 
     const line = JSON.stringify(payload);
