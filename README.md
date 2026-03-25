@@ -1,8 +1,6 @@
-# LinkedIn Profile Search — Backend
+# LinkedIn Profile Search - Backend
 
-Standalone Node.js + Express API that connects to an Azure PostgreSQL database and provides full-text search over LinkedIn profiles using PostgreSQL's `ts_rank_cd` weighted scoring.
-
----
+Standalone Node.js + Express API that uses OpenSearch for filtering, ranking, count, and pagination, then hydrates full profile data from PostgreSQL.
 
 ## Tech Stack
 
@@ -11,72 +9,73 @@ Standalone Node.js + Express API that connects to an Azure PostgreSQL database a
 | Runtime | Node.js 18+ |
 | Framework | Express 5 |
 | Language | TypeScript |
-| Database | PostgreSQL (Azure) via `pg` |
+| Search | OpenSearch |
+| Database | PostgreSQL via `pg` |
 | Logging | Pino |
-
----
 
 ## Endpoints
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/healthz` | Health check |
-| `GET` | `/api/search/count` | Total match count + subset info |
-| `GET` | `/api/search/profiles` | Ranked profiles (paginated, subset-aware) |
+| `POST` | `/api/search/profiles` | Ranked profiles with pagination |
 | `GET` | `/api/search/profile/:id` | Full profile detail |
+| `GET` | `/api/search/locations` | Distinct locations from PostgreSQL with pagination |
 
-### Query parameters — `/api/search/count` and `/api/search/profiles`
+### Request body - `/api/search/profiles`
 
 | Param | Type | Description |
 |---|---|---|
-| `skills` | string | Skill keywords (supports phrases, NOT) |
-| `designation` | string | Job title / designation |
-| `subset` | number | 0-indexed subset of 1 000 profiles (default `0`) |
-| `page` | number | Page within the subset, 20 per page (default `1`) |
+| `skills` | string | Boolean search string used in OpenSearch |
+| `designation` | string | Boolean search string used in OpenSearch |
+| `location` | string | Exact match filter on `location_full.keyword` |
+| `years_of_experience` | number | Exact match filter on `total_years_exp` |
+| `page` | number | 1-indexed page, 20 profiles per page |
 
----
+### Query parameters - `/api/search/locations`
+
+| Param | Type | Description |
+|---|---|---|
+| `page` | number | 1-indexed page, 50 locations per page |
 
 ## Search Query Syntax
 
-### Skills
+`skills` and `designation` are passed through as boolean query text. If both are present, the backend combines them as:
+
+```text
+(skills) AND (designation)
+```
+
+Examples:
 
 | Input | Behaviour |
 |---|---|
-| `java, spring` | AND — must contain both |
-| `"Full stack"` | Phrase query — words must appear adjacent |
-| `java NOT docker` | NOT — exclude profiles mentioning docker |
-| `java, "Full stack", NOT docker` | All combined |
+| `java AND spring` | Both terms required |
+| `java AND (sql OR mongo OR postgres OR AWS)` | Mixed boolean query |
+| `software AND engineer` | Both designation terms required |
 
-### Designation
+## Score Normalization
 
-Multi-word designation is automatically treated as a phrase query.  
-`Software Engineer` → searches for profiles where both words appear adjacent.
+OpenSearch `_score` is returned as raw score and also normalized to a 0-100 scale.
 
----
+- `maxScore.normalized` is always `100` when there are hits
+- each profile score is `(_score / max_score) * 100`
 
 ## Prerequisites
 
-- **Node.js ≥ 18** ([download](https://nodejs.org))
-- Access to the Azure PostgreSQL database with valid credentials
+- Node.js >= 18
+- Access to PostgreSQL
+- Access to OpenSearch
 
----
-
-## Installation & Run
-
-### 1 — Clone the repo
+## Installation and Run
 
 ```bash
 git clone https://github.com/Sudhakaran98/linkedin-search-backend.git
 cd linkedin-search-backend
+npm install
 ```
 
-### 2 — Create your `.env` file
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and fill in your database credentials:
+Create `.env`:
 
 ```env
 PORT=8080
@@ -87,68 +86,46 @@ DB_NAME=postgres
 DB_USER=linkedin_scraper
 DB_PASSWORD=your_actual_password_here
 
+OPENSEARCH_URL=http://localhost:9200
+OPENSEARCH_INDEX=profiles
+OPENSEARCH_USERNAME=admin
+OPENSEARCH_PASSWORD=admin
+
 NODE_ENV=development
 LOG_LEVEL=info
 ```
 
-### 3 — Install dependencies
-
-```bash
-npm install
-```
-
-### 4 — Start the dev server
+Start the app:
 
 ```bash
 npm run dev
 ```
 
-Server starts at **http://localhost:8080** with hot-reload.
+Sample search request:
 
----
-
-## Production Build
-
-```bash
-npm run build    # compiles TypeScript → dist/
-npm start        # runs dist/index.js
+```json
+{
+  "skills": "java and spring not \"full stack\"",
+  "designation": "software engineer",
+  "location": "Bengaluru, Karnataka, India",
+  "years_of_experience": 10,
+  "page": 1
+}
 ```
-
----
-
-## Project Structure
-
-```
-linkedin-search-backend/
-├── src/
-│   ├── lib/
-│   │   ├── db.ts              ← PostgreSQL connection pool (pg.Pool)
-│   │   ├── logger.ts          ← Pino logger
-│   │   └── searchQuery.ts     ← tsquery builder (phrase, NOT, AND)
-│   ├── routes/
-│   │   ├── index.ts           ← Router aggregator
-│   │   ├── health.ts          ← GET /api/healthz
-│   │   └── search.ts          ← GET /api/search/* (count, profiles, profile/:id)
-│   ├── app.ts                 ← Express app setup
-│   └── index.ts               ← Entry point
-├── .env.example               ← Environment variable template
-├── package.json
-└── tsconfig.json
-```
-
----
 
 ## Environment Variables
-
-See `.env.example` for all available variables.
 
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `8080` | HTTP port |
-| `DB_HOST` | `linkedin-scraper.postgres.database.azure.com` | DB host |
-| `DB_PORT` | `5432` | DB port |
-| `DB_NAME` | `postgres` | Database name |
-| `DB_USER` | `linkedin_scraper` | DB username |
-| `DB_PASSWORD` | — | DB password (**required**) |
-| `NODE_ENV` | `development` | `development` or `production` |
+| `DB_HOST` | - | Postgres host |
+| `DB_PORT` | `5432` | Postgres port |
+| `DB_NAME` | `postgres` | Postgres database |
+| `DB_USER` | - | Postgres user |
+| `DB_PASSWORD` | - | Postgres password |
+| `OPENSEARCH_URL` | - | OpenSearch base URL |
+| `OPENSEARCH_INDEX` | `profiles` | OpenSearch index name |
+| `OPENSEARCH_USERNAME` | - | OpenSearch username |
+| `OPENSEARCH_PASSWORD` | - | OpenSearch password |
+| `NODE_ENV` | `development` | Runtime environment |
 | `LOG_LEVEL` | `info` | Pino log level |
