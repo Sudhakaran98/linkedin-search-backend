@@ -10,9 +10,12 @@ export const PROFILE_SEARCH_FIELDS = [
   "skills^4",
 ] as const;
 
+const FEMALE_CANDIDATE_NAME_REGEX = ".*[aiy]";
+
 type SearchQueryParams = {
   skills?: string;
   designation?: string;
+  femaleCandidate?: boolean;
   locations?: string[];
   minExperience?: number;
   maxExperience?: number;
@@ -28,6 +31,7 @@ function normalizeBooleanInput(value?: string): string | null {
 export function buildProfileSearchQuery({
   skills,
   designation,
+  femaleCandidate,
   locations,
   minExperience,
   maxExperience,
@@ -48,6 +52,26 @@ export function buildProfileSearchQuery({
         query: booleanParts.join(" AND "),
         fields: [...PROFILE_SEARCH_FIELDS],
         default_operator: "AND",
+      },
+    });
+  }
+
+  if (femaleCandidate) {
+    filter.push({
+      bool: {
+        should: [
+          {
+            regexp: {
+              "first_name.keyword": FEMALE_CANDIDATE_NAME_REGEX,
+            },
+          },
+          {
+            regexp: {
+              "full_name.keyword": FEMALE_CANDIDATE_NAME_REGEX,
+            },
+          },
+        ],
+        minimum_should_match: 1,
       },
     });
   }

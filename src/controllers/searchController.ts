@@ -14,6 +14,7 @@ const EXPORT_PG_BATCH_SIZE = 1000;
 type SearchInputs = {
   skills?: string;
   designation?: string;
+  femaleCandidate?: boolean;
   locations?: string[];
   minExperience?: number;
   maxExperience?: number;
@@ -31,6 +32,19 @@ function parseExperienceValue(rawYears: unknown): number | undefined {
 
   const parsed = parseInt(String(rawYears), 10);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseBooleanValue(rawValue: unknown): boolean {
+  if (typeof rawValue === "boolean") {
+    return rawValue;
+  }
+
+  if (typeof rawValue === "string") {
+    const normalized = rawValue.trim().toLowerCase();
+    return normalized === "true" || normalized === "1" || normalized === "yes";
+  }
+
+  return false;
 }
 
 function normalizeLocations(rawLocation: unknown): string[] {
@@ -54,9 +68,18 @@ function normalizeBooleanFilterText(value?: string): string | undefined {
 }
 
 function getSearchInputs(req: Request): SearchInputs {
-  const { skills, designation, location, min_experience, max_experience, page } = req.body as {
+  const {
+    skills,
+    designation,
+    female_candidate,
+    location,
+    min_experience,
+    max_experience,
+    page,
+  } = req.body as {
     skills?: string;
     designation?: string;
+    female_candidate?: string | boolean;
     location?: string | string[];
     min_experience?: string | number;
     max_experience?: string | number;
@@ -69,6 +92,7 @@ function getSearchInputs(req: Request): SearchInputs {
   return {
     skills: normalizeBooleanFilterText(skills),
     designation: normalizeBooleanFilterText(designation),
+    femaleCandidate: parseBooleanValue(female_candidate),
     locations: normalizeLocations(location),
     minExperience:
       minExperience !== undefined && maxExperience !== undefined
