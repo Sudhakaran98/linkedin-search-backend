@@ -9,6 +9,7 @@ import {
 } from "../lib/searchQuery.js";
 
 const LOCATION_PAGE_SIZE = 50;
+const COMPANY_CATEGORY_PAGE_SIZE = 50;
 const EXPORT_PG_BATCH_SIZE = 1000;
 
 type SearchInputs = {
@@ -16,6 +17,8 @@ type SearchInputs = {
   designation?: string;
   femaleCandidate?: boolean;
   locations?: string[];
+  companySizeRanges?: string[];
+  companyCategories?: string[];
   minExperience?: number;
   maxExperience?: number;
   page: number;
@@ -62,6 +65,19 @@ function normalizeLocations(rawLocation: unknown): string[] {
   return [];
 }
 
+function normalizeStringArray(rawValue: unknown): string[] {
+  if (Array.isArray(rawValue)) {
+    return rawValue.map((value) => String(value ?? "").trim()).filter(Boolean);
+  }
+
+  if (typeof rawValue === "string") {
+    const trimmed = rawValue.trim();
+    return trimmed ? [trimmed] : [];
+  }
+
+  return [];
+}
+
 function normalizeBooleanFilterText(value?: string): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed.toUpperCase() : undefined;
@@ -73,6 +89,8 @@ function getSearchInputs(req: Request): SearchInputs {
     designation,
     female_candidate,
     location,
+    company_size_ranges,
+    company_categories,
     min_experience,
     max_experience,
     page,
@@ -81,6 +99,8 @@ function getSearchInputs(req: Request): SearchInputs {
     designation?: string;
     female_candidate?: string | boolean;
     location?: string | string[];
+    company_size_ranges?: string | string[];
+    company_categories?: string | string[];
     min_experience?: string | number;
     max_experience?: string | number;
     page?: string | number;
@@ -94,6 +114,8 @@ function getSearchInputs(req: Request): SearchInputs {
     designation: normalizeBooleanFilterText(designation),
     femaleCandidate: parseBooleanValue(female_candidate),
     locations: normalizeLocations(location),
+    companySizeRanges: normalizeStringArray(company_size_ranges),
+    companyCategories: normalizeStringArray(company_categories),
     minExperience:
       minExperience !== undefined && maxExperience !== undefined
         ? Math.min(minExperience, maxExperience)
@@ -164,13 +186,7 @@ async function fetchProfilesByIds(profileIds: number[]) {
 
   return profilesResult.rows.map((row) => ({
     ...row,
-    ...getCurrentExperienceFromRows(experiencesById.get(Number(row.id)) ?? []),
-    total_experience_duration_months: calculateExperienceDurationMonths(
-      experiencesById.get(Number(row.id)) ?? []
-    ),
-    active_experience_company_name:
-      getCurrentExperienceFromRows(experiencesById.get(Number(row.id)) ?? [])
-        .active_experience_company_name,
+    ...getExperienceSummaryFromRows(experiencesById.get(Number(row.id)) ?? []),
   }));
 }
 
@@ -199,6 +215,8 @@ function mapListProfiles(openSearchResult: Awaited<ReturnType<typeof searchProfi
         active_experience_company_name: row.active_experience_company_name ?? undefined,
         active_experience_company_logo_url:
           row.active_experience_company_logo_url ?? undefined,
+        current_experience_label: row.current_experience_label ?? undefined,
+        past_experience_labels: row.past_experience_labels ?? [],
         summary: row.summary ?? undefined,
         total_experience_duration_months:
           row.total_experience_duration_months ?? undefined,
@@ -333,6 +351,41 @@ function getCurrentExperienceFromRows(experiences: ExperienceDateRow[]) {
   return {
     active_experience_title: currentExperience?.position_title ?? undefined,
     active_experience_company_name: currentExperience?.company_name ?? undefined,
+  };
+}
+
+function formatExperienceLabel(experience: ExperienceDateRow): string {
+  const title = String(experience.position_title ?? "").trim();
+  const company = String(experience.company_name ?? "").trim();
+
+  if (title && company) {
+    return `${title} at ${company}`;
+  }
+
+  return title || company;
+}
+
+function getExperienceSummaryFromRows(experiences: ExperienceDateRow[]) {
+  const currentExperience =
+    experiences.find(
+      (experience) => experience.active_experience === true && experience.order_in_profile === 1
+    ) ?? experiences[0];
+
+  const currentExperienceLabel = currentExperience
+    ? formatExperienceLabel(currentExperience)
+    : undefined;
+
+  const pastExperienceLabels = experiences
+    .filter((experience) => experience !== currentExperience)
+    .map(formatExperienceLabel)
+    .filter((label) => Boolean(label));
+
+  return {
+    active_experience_title: currentExperience?.position_title ?? undefined,
+    active_experience_company_name: currentExperience?.company_name ?? undefined,
+    current_experience_label: currentExperienceLabel,
+    past_experience_labels: pastExperienceLabels,
+    total_experience_duration_months: calculateExperienceDurationMonths(experiences),
   };
 }
 
@@ -728,10 +781,10 @@ export async function getProfileDetails(req: Request, res: Response) {
     ]);
 
     const row = profileResult.rows[0];
-    const currentExperience = getCurrentExperienceFromRows(experiencesRows as ExperienceDateRow[]);
-    const totalExperienceDurationMonths = calculateExperienceDurationMonths(
-      experiencesRows as ExperienceDateRow[]
-    );
+      const currentExperience = getCurrentExperienceFromRows(experiencesRows as ExperienceDateRow[]);
+      const totalExperienceDurationMonths = calculateExperienceDurationMonths(
+        experiencesRows as ExperienceDateRow[]
+      );
 
     res.json({
       id: String(row.id),
@@ -918,5 +971,63 @@ export async function listLocations(req: Request, res: Response) {
   } catch (err) {
     req.log.error({ err }, "List locations error");
     res.status(500).json({ error: "Failed to fetch locations" });
+  }
+}
+
+export async function listCompanyCategories(req: Request, res: Response) {
+  const page = parsePage(req.query.page);
+  const offset = (page - 1) * COMPANY_CATEGORY_PAGE_SIZE;
+  const search = String(req.query.search ?? "").trim();
+  const searchPattern = `%${search}%`;
+
+  try {
+    const [countResult, categoriesResult] = await Promise.all([
+      linkedinPool.query<{ total: string }>(
+        `
+        WITH categories AS (
+          SELECT DISTINCT btrim(category) AS category
+          FROM linkedin.companies c
+          CROSS JOIN LATERAL unnest(COALESCE(c.company_categories_and_keywords, ARRAY[]::text[])) AS category
+          WHERE category IS NOT NULL
+            AND btrim(category) <> ''
+            AND ($1 = '%%' OR btrim(category) ILIKE $1)
+        )
+        SELECT COUNT(*)::text AS total
+        FROM categories
+        `,
+        [searchPattern]
+      ),
+      linkedinPool.query<{ category: string }>(
+        `
+        WITH categories AS (
+          SELECT DISTINCT btrim(category) AS category
+          FROM linkedin.companies c
+          CROSS JOIN LATERAL unnest(COALESCE(c.company_categories_and_keywords, ARRAY[]::text[])) AS category
+          WHERE category IS NOT NULL
+            AND btrim(category) <> ''
+            AND ($3 = '%%' OR btrim(category) ILIKE $3)
+        )
+        SELECT category
+        FROM categories
+        ORDER BY category ASC
+        LIMIT $1 OFFSET $2
+        `,
+        [COMPANY_CATEGORY_PAGE_SIZE, offset, searchPattern]
+      ),
+    ]);
+
+    const total = Number(countResult.rows[0]?.total ?? 0);
+    const totalPages = total > 0 ? Math.ceil(total / COMPANY_CATEGORY_PAGE_SIZE) : 0;
+
+    res.json({
+      companyCategories: categoriesResult.rows.map((row) => row.category),
+      total,
+      page,
+      totalPages,
+      pageSize: COMPANY_CATEGORY_PAGE_SIZE,
+    });
+  } catch (err) {
+    req.log.error({ err }, "List company categories error");
+    res.status(500).json({ error: "Failed to fetch company categories" });
   }
 }
