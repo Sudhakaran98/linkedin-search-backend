@@ -3,7 +3,7 @@ import pg from "pg";
 const { Pool } = pg;
 
 const pool = new Pool({
-  host:     process.env.DB_HOST     ?? "linkedin-scraper.postgres.database.azure.com",
+  host:     process.env.DB_HOST     ?? "135.235.196.207",
   port:     parseInt(process.env.DB_PORT ?? "5432", 10),
   database: process.env.DB_NAME     ?? "postgres",
   user:     process.env.DB_USER     ?? "linkedin_scraper",
