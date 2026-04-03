@@ -6,11 +6,16 @@ import {
   EXPORT_BATCH_SIZE,
   normalizeScore,
   PAGE_SIZE,
+  SELECT_ALL_FILTER_VALUE,
 } from "../lib/searchQuery.js";
 
 const LOCATION_PAGE_SIZE = 50;
 const COMPANY_CATEGORY_PAGE_SIZE = 50;
 const EXPORT_PG_BATCH_SIZE = 1000;
+
+function isSelectAllFilterValue(value: string): boolean {
+  return value.trim().toLowerCase() === SELECT_ALL_FILTER_VALUE.toLowerCase();
+}
 
 type SearchInputs = {
   skills?: string;
@@ -19,6 +24,7 @@ type SearchInputs = {
   locations?: string[];
   companySizeRanges?: string[];
   companyCategories?: string[];
+  companyCategoryScope?: "current" | "past";
   minExperience?: number;
   maxExperience?: number;
   page: number;
@@ -54,12 +60,12 @@ function normalizeLocations(rawLocation: unknown): string[] {
   if (Array.isArray(rawLocation)) {
     return rawLocation
       .map((location) => String(location ?? "").trim())
-      .filter(Boolean);
+      .filter((location) => Boolean(location) && !isSelectAllFilterValue(location));
   }
 
   if (typeof rawLocation === "string") {
     const trimmed = rawLocation.trim();
-    return trimmed ? [trimmed] : [];
+    return trimmed && !isSelectAllFilterValue(trimmed) ? [trimmed] : [];
   }
 
   return [];
@@ -67,12 +73,14 @@ function normalizeLocations(rawLocation: unknown): string[] {
 
 function normalizeStringArray(rawValue: unknown): string[] {
   if (Array.isArray(rawValue)) {
-    return rawValue.map((value) => String(value ?? "").trim()).filter(Boolean);
+    return rawValue
+      .map((value) => String(value ?? "").trim())
+      .filter((value) => Boolean(value) && !isSelectAllFilterValue(value));
   }
 
   if (typeof rawValue === "string") {
     const trimmed = rawValue.trim();
-    return trimmed ? [trimmed] : [];
+    return trimmed && !isSelectAllFilterValue(trimmed) ? [trimmed] : [];
   }
 
   return [];
@@ -83,6 +91,14 @@ function normalizeBooleanFilterText(value?: string): string | undefined {
   return trimmed ? trimmed.toUpperCase() : undefined;
 }
 
+function normalizeCompanyCategoryScope(value: unknown): "current" | "past" {
+  if (typeof value !== "string") {
+    return "current";
+  }
+
+  return value.trim().toLowerCase() === "past" ? "past" : "current";
+}
+
 function getSearchInputs(req: Request): SearchInputs {
   const {
     skills,
@@ -91,6 +107,7 @@ function getSearchInputs(req: Request): SearchInputs {
     location,
     company_size_ranges,
     company_categories,
+    company_category_scope,
     min_experience,
     max_experience,
     page,
@@ -101,6 +118,7 @@ function getSearchInputs(req: Request): SearchInputs {
     location?: string | string[];
     company_size_ranges?: string | string[];
     company_categories?: string | string[];
+    company_category_scope?: string;
     min_experience?: string | number;
     max_experience?: string | number;
     page?: string | number;
@@ -116,6 +134,7 @@ function getSearchInputs(req: Request): SearchInputs {
     locations: normalizeLocations(location),
     companySizeRanges: normalizeStringArray(company_size_ranges),
     companyCategories: normalizeStringArray(company_categories),
+    companyCategoryScope: normalizeCompanyCategoryScope(company_category_scope),
     minExperience:
       minExperience !== undefined && maxExperience !== undefined
         ? Math.min(minExperience, maxExperience)
@@ -1018,9 +1037,11 @@ export async function listCompanyCategories(req: Request, res: Response) {
 
     const total = Number(countResult.rows[0]?.total ?? 0);
     const totalPages = total > 0 ? Math.ceil(total / COMPANY_CATEGORY_PAGE_SIZE) : 0;
+    const companyCategories = categoriesResult.rows.map((row) => row.category);
 
     res.json({
-      companyCategories: categoriesResult.rows.map((row) => row.category),
+      companyCategories:
+        page === 1 ? [SELECT_ALL_FILTER_VALUE, ...companyCategories] : companyCategories,
       total,
       page,
       totalPages,

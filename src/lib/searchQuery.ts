@@ -1,5 +1,6 @@
 export const PAGE_SIZE = 10;
 export const EXPORT_BATCH_SIZE = 1000;
+export const SELECT_ALL_FILTER_VALUE = "Select All";
 
 export const PROFILE_SEARCH_FIELDS = [
   "headline^10",
@@ -23,6 +24,10 @@ const COMPANY_SIZE_RANGE_MAP: Record<string, { min: number; max?: number }> = {
   "10,001+ employees": { min: 10001 },
 };
 
+function isSelectAllFilterValue(value: string): boolean {
+  return value.trim().toLowerCase() === SELECT_ALL_FILTER_VALUE.toLowerCase();
+}
+
 type SearchQueryParams = {
   skills?: string;
   designation?: string;
@@ -30,6 +35,7 @@ type SearchQueryParams = {
   locations?: string[];
   companySizeRanges?: string[];
   companyCategories?: string[];
+  companyCategoryScope?: "current" | "past";
   minExperience?: number;
   maxExperience?: number;
   page: number;
@@ -48,6 +54,7 @@ export function buildProfileSearchQuery({
   locations,
   companySizeRanges,
   companyCategories,
+  companyCategoryScope,
   minExperience,
   maxExperience,
   page,
@@ -97,60 +104,90 @@ export function buildProfileSearchQuery({
       .filter((range): range is { min: number; max?: number } => Boolean(range)) ?? [];
 
   const selectedCompanyCategories =
-    companyCategories?.map((category) => category.trim()).filter(Boolean) ?? [];
+    companyCategories
+      ?.map((category) => category.trim())
+      .filter((category) => Boolean(category) && !isSelectAllFilterValue(category)) ?? [];
 
-  if (selectedCompanySizeRanges.length > 0 || selectedCompanyCategories.length > 0) {
-    const nestedFilters: Array<Record<string, unknown>> = [];
-
-    if (selectedCompanySizeRanges.length > 0) {
-      nestedFilters.push({
-        bool: {
-          should: selectedCompanySizeRanges.map((range) => {
-            const rangeFilters: Array<Record<string, unknown>> = [
+  if (selectedCompanySizeRanges.length > 0) {
+    filter.push({
+      nested: {
+        path: "experiences",
+        query: {
+          bool: {
+            filter: [
               {
-                range: {
-                  "experiences.company_size_max": {
-                    gte: range.min,
-                  },
+                term: {
+                  "experiences.order_in_profile": 1,
                 },
               },
-            ];
+              {
+                bool: {
+                  should: selectedCompanySizeRanges.map((range) => {
+                    const rangeFilters: Array<Record<string, unknown>> = [
+                      {
+                        range: {
+                          "experiences.company_size_max": {
+                            gte: range.min,
+                          },
+                        },
+                      },
+                    ];
 
-            if (typeof range.max === "number") {
-              rangeFilters.push({
-                range: {
-                  "experiences.company_size_min": {
-                    lte: range.max,
-                  },
+                    if (typeof range.max === "number") {
+                      rangeFilters.push({
+                        range: {
+                          "experiences.company_size_min": {
+                            lte: range.max,
+                          },
+                        },
+                      });
+                    }
+
+                    return {
+                      bool: {
+                        filter: rangeFilters,
+                      },
+                    };
+                  }),
+                  minimum_should_match: 1,
                 },
-              });
-            }
-
-            return {
-              bool: {
-                filter: rangeFilters,
               },
-            };
-          }),
-          minimum_should_match: 1,
+            ],
+          },
         },
-      });
-    }
+      },
+    });
+  }
 
-    if (selectedCompanyCategories.length > 0) {
-      nestedFilters.push({
-        terms: {
-          "experiences.company_categories_and_keywords": selectedCompanyCategories,
-        },
-      });
-    }
+  if (selectedCompanyCategories.length > 0) {
+    const companyCategoryScopeFilter =
+      companyCategoryScope === "past"
+        ? {
+            range: {
+              "experiences.order_in_profile": {
+                gt: 1,
+              },
+            },
+          }
+        : {
+            term: {
+              "experiences.order_in_profile": 1,
+            },
+          };
 
     filter.push({
       nested: {
         path: "experiences",
         query: {
           bool: {
-            filter: nestedFilters,
+            filter: [
+              companyCategoryScopeFilter,
+              {
+                terms: {
+                  "experiences.company_categories_and_keywords": selectedCompanyCategories,
+                },
+              },
+            ],
           },
         },
       },
@@ -158,7 +195,9 @@ export function buildProfileSearchQuery({
   }
 
   const normalizedLocations =
-    locations?.map((location) => location.trim()).filter(Boolean) ?? [];
+    locations
+      ?.map((location) => location.trim())
+      .filter((location) => Boolean(location) && !isSelectAllFilterValue(location)) ?? [];
 
   if (normalizedLocations.length === 1) {
     filter.push({

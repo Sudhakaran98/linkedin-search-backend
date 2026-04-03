@@ -4,7 +4,7 @@ const OPEN_SEARCH_URL =
   process.env.OPENSEARCH_URL ??
   process.env.OPENSEARCH_NODE_URL ??
   process.env.ELASTICSEARCH_URL ??
-  "https://98.70.36.206:9200";
+  "https://135.235.196.207:9200";
 
 const OPEN_SEARCH_INDEX = process.env.OPENSEARCH_INDEX ?? "profiles";
 const OPEN_SEARCH_USERNAME =
@@ -37,7 +37,9 @@ type OpenSearchHit = {
   _id: string;
   _score: number | null;
   _source?: {
-    profile_id?: number;
+    profile_id?: number | string;
+    id?: number | string;
+    public_profile_id?: number | string;
   };
 };
 
@@ -64,11 +66,24 @@ export async function searchProfiles(body: Record<string, unknown>) {
   const maxScore = response.body?.hits?.max_score ?? 0;
   const hits = response.body?.hits?.hits ?? [];
 
+  console.log(
+    "OpenSearch raw hit sample:",
+    hits.slice(0, 3).map((hit) => ({
+      _id: hit._id,
+      _score: hit._score,
+      _source: hit._source,
+    }))
+  );
+
   return {
     total,
     maxScore: maxScore ?? 0,
     hits: hits.map((hit) => ({
-      id: hit._source?.profile_id ?? Number(hit._id),
+      id:
+        Number(hit._source?.profile_id) ||
+        Number(hit._source?.public_profile_id) ||
+        Number(hit._source?.id) ||
+        Number(hit._id),
       score: hit._score ?? 0,
     })),
   };
