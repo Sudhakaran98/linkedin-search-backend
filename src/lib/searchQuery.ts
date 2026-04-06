@@ -1,6 +1,9 @@
 export const PAGE_SIZE = 10;
 export const EXPORT_BATCH_SIZE = 1000;
 export const SELECT_ALL_FILTER_VALUE = "Select All";
+export const SUPPORTED_GENDERS = ["male", "female"] as const;
+
+const FEMALE_CANDIDATE_NAME_REGEX = ".*[aiy]";
 
 export const PROFILE_SEARCH_FIELDS = [
   "headline^10",
@@ -10,8 +13,6 @@ export const PROFILE_SEARCH_FIELDS = [
   "past_experience^6",
   "skills^4",
 ] as const;
-
-const FEMALE_CANDIDATE_NAME_REGEX = ".*[aiy]";
 
 const COMPANY_SIZE_RANGE_MAP: Record<string, { min: number; max?: number }> = {
   "1-10 employees": { min: 1, max: 10 },
@@ -28,10 +29,143 @@ function isSelectAllFilterValue(value: string): boolean {
   return value.trim().toLowerCase() === SELECT_ALL_FILTER_VALUE.toLowerCase();
 }
 
+function isWrappedByOuterParentheses(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("(") || !trimmed.endsWith(")")) {
+    return false;
+  }
+
+  let depth = 0;
+  let inQuotes = false;
+
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const char = trimmed[index];
+    const previousChar = index > 0 ? trimmed[index - 1] : "";
+
+    if (char === '"' && previousChar !== "\\") {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (inQuotes) {
+      continue;
+    }
+
+    if (char === "(") {
+      depth += 1;
+    } else if (char === ")") {
+      depth -= 1;
+
+      if (depth === 0 && index < trimmed.length - 1) {
+        return false;
+      }
+    }
+  }
+
+  return depth === 0;
+}
+
+function splitBooleanExpression(value: string, operator: "AND" | "OR"): string[] {
+  const parts: string[] = [];
+  const trimmed = value.trim();
+  let inQuotes = false;
+  let depth = 0;
+  let start = 0;
+
+  const isOperatorBoundary = (char: string | undefined, side: "left" | "right") => {
+    if (!char) {
+      return true;
+    }
+
+    if (/\s/.test(char)) {
+      return true;
+    }
+
+    if (side === "left") {
+      return char === "(" || char === ")";
+    }
+
+    return char === "(" || char === ")";
+  };
+
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const char = trimmed[index];
+    const previousChar = index > 0 ? trimmed[index - 1] : "";
+
+    if (char === '"' && previousChar !== "\\") {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (inQuotes) {
+      continue;
+    }
+
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+
+    const possibleOperator = trimmed.slice(index, index + operator.length).toUpperCase();
+    const leftBoundaryChar = index > 0 ? trimmed[index - 1] : undefined;
+    const rightBoundaryChar =
+      index + operator.length < trimmed.length ? trimmed[index + operator.length] : undefined;
+
+    if (
+      depth === 0 &&
+      possibleOperator === operator &&
+      isOperatorBoundary(leftBoundaryChar, "left") &&
+      isOperatorBoundary(rightBoundaryChar, "right")
+    ) {
+      parts.push(trimmed.slice(start, index).trim());
+      start = index + operator.length;
+      index += operator.length - 1;
+    }
+  }
+
+  const lastPart = trimmed.slice(start).trim();
+  if (lastPart) {
+    parts.push(lastPart);
+  }
+
+  return parts;
+}
+
+function normalizeBooleanExpression(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  if (isWrappedByOuterParentheses(trimmed)) {
+    return `(${normalizeBooleanExpression(trimmed.slice(1, -1))})`;
+  }
+
+  const andParts = splitBooleanExpression(trimmed, "AND");
+  if (andParts.length > 1) {
+    return andParts.map((part) => normalizeBooleanExpression(part)).join(" AND ");
+  }
+
+  const orParts = splitBooleanExpression(trimmed, "OR");
+  if (orParts.length > 1) {
+    return orParts
+      .map((part) => `(${normalizeBooleanExpression(part)})`)
+      .join(" OR ");
+  }
+
+  return trimmed;
+}
+
 type SearchQueryParams = {
   skills?: string;
   designation?: string;
   femaleCandidate?: boolean;
+  gender?: (typeof SUPPORTED_GENDERS)[number];
   locations?: string[];
   companySizeRanges?: string[];
   companyCategories?: string[];
@@ -44,13 +178,14 @@ type SearchQueryParams = {
 
 function normalizeBooleanInput(value?: string): string | null {
   const trimmed = value?.trim();
-  return trimmed ? `(${trimmed})` : null;
+  return trimmed ? `(${normalizeBooleanExpression(trimmed)})` : null;
 }
 
 export function buildProfileSearchQuery({
   skills,
   designation,
   femaleCandidate,
+  gender,
   locations,
   companySizeRanges,
   companyCategories,
@@ -78,22 +213,45 @@ export function buildProfileSearchQuery({
     });
   }
 
-  if (femaleCandidate) {
+  if (gender) {
+    filter.push({
+      term: {
+        gender,
+      },
+    });
+  } else if (femaleCandidate) {
     filter.push({
       bool: {
-        should: [
+        filter: [
           {
-            regexp: {
-              "first_name.keyword": FEMALE_CANDIDATE_NAME_REGEX,
+            bool: {
+              should: [
+                {
+                  regexp: {
+                    "first_name.keyword": FEMALE_CANDIDATE_NAME_REGEX,
+                  },
+                },
+                {
+                  regexp: {
+                    "full_name.keyword": FEMALE_CANDIDATE_NAME_REGEX,
+                  },
+                },
+              ],
+              minimum_should_match: 1,
             },
           },
           {
-            regexp: {
-              "full_name.keyword": FEMALE_CANDIDATE_NAME_REGEX,
+            bool: {
+              must_not: [
+                {
+                  term: {
+                    gender: "male",
+                  },
+                },
+              ],
             },
           },
         ],
-        minimum_should_match: 1,
       },
     });
   }

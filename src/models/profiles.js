@@ -17,6 +17,7 @@ module.exports = (sequelize, DataTypes) => {
             linkedin_shorthand_names: DataTypes.ARRAY(DataTypes.TEXT),
             historical_ids: DataTypes.ARRAY(DataTypes.BIGINT),
             full_name: DataTypes.TEXT,
+            gender: DataTypes.TEXT,
             first_name: DataTypes.TEXT,
             middle_name: DataTypes.TEXT,
             first_name_initial: DataTypes.TEXT,

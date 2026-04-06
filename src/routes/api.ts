@@ -6,11 +6,13 @@ import {
   listLocations,
   listProfiles,
   proxyProfileImage,
+  updateGender,
 } from "../controllers/searchController.js";
 
 const router: IRouter = Router();
 
 router.post("/profiles", listProfiles);
+router.post("/profiles/gender", updateGender);
 router.post("/profiles/download", downloadProfilesCsv);
 router.get("/profile/:profileId", getProfileDetails);
 router.get("/profile-image", proxyProfileImage);

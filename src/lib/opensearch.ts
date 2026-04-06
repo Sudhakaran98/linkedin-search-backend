@@ -15,6 +15,7 @@ const OPEN_SEARCH_PASSWORD =
   process.env.OPENSEARCH_PASSWORD ??
   process.env.OPENSEARCH_PASS ??
   "Link3diN$c6ap3rOp3nS3a6ch";
+const OPEN_SEARCH_GENDER_BATCH_SIZE = 500;
 
 const osClient = new Client({
   node: OPEN_SEARCH_URL,
@@ -56,6 +57,22 @@ type OpenSearchSearchResponse = {
   };
 };
 
+type OpenSearchUpdateByQueryResponse = {
+  body?: {
+    updated?: number;
+  };
+};
+
+function chunkItems<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
 export async function searchProfiles(body: Record<string, unknown>) {
   const response = (await osClient.search({
     index: OPEN_SEARCH_INDEX,
@@ -87,4 +104,59 @@ export async function searchProfiles(body: Record<string, unknown>) {
       score: hit._score ?? 0,
     })),
   };
+}
+
+export async function updateProfilesGender(
+  profileIds: number[],
+  gender: "male" | "female"
+) {
+  if (profileIds.length === 0) {
+    return { updated: 0 };
+  }
+
+  let updated = 0;
+
+  for (const profileIdBatch of chunkItems(profileIds, OPEN_SEARCH_GENDER_BATCH_SIZE)) {
+    const response = (await osClient.updateByQuery({
+      index: OPEN_SEARCH_INDEX,
+      refresh: true,
+      conflicts: "proceed",
+      wait_for_completion: true,
+      body: {
+        script: {
+          lang: "painless",
+          source: "ctx._source.gender = params.gender",
+          params: {
+            gender,
+          },
+        },
+        query: {
+          bool: {
+            should: [
+              {
+                terms: {
+                  profile_id: profileIdBatch,
+                },
+              },
+              {
+                terms: {
+                  public_profile_id: profileIdBatch,
+                },
+              },
+              {
+                terms: {
+                  id: profileIdBatch,
+                },
+              },
+            ],
+            minimum_should_match: 1,
+          },
+        },
+      },
+    })) as OpenSearchUpdateByQueryResponse;
+
+    updated += response.body?.updated ?? 0;
+  }
+
+  return { updated };
 }

@@ -1,12 +1,14 @@
 import { type Request, type Response } from "express";
+import { type PoolClient } from "pg";
 import linkedinPool from "../lib/db.js";
-import { searchProfiles } from "../lib/opensearch.js";
+import { searchProfiles, updateProfilesGender } from "../lib/opensearch.js";
 import {
   buildProfileSearchQuery,
   EXPORT_BATCH_SIZE,
   normalizeScore,
   PAGE_SIZE,
   SELECT_ALL_FILTER_VALUE,
+  SUPPORTED_GENDERS,
 } from "../lib/searchQuery.js";
 
 const LOCATION_PAGE_SIZE = 50;
@@ -17,10 +19,22 @@ function isSelectAllFilterValue(value: string): boolean {
   return value.trim().toLowerCase() === SELECT_ALL_FILTER_VALUE.toLowerCase();
 }
 
+function normalizeGenderValue(
+  value: unknown
+): (typeof SUPPORTED_GENDERS)[number] | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return SUPPORTED_GENDERS.find((gender) => gender === normalized);
+}
+
 type SearchInputs = {
   skills?: string;
   designation?: string;
   femaleCandidate?: boolean;
+  gender?: (typeof SUPPORTED_GENDERS)[number];
   locations?: string[];
   companySizeRanges?: string[];
   companyCategories?: string[];
@@ -104,6 +118,7 @@ function getSearchInputs(req: Request): SearchInputs {
     skills,
     designation,
     female_candidate,
+    gender,
     location,
     company_size_ranges,
     company_categories,
@@ -115,6 +130,7 @@ function getSearchInputs(req: Request): SearchInputs {
     skills?: string;
     designation?: string;
     female_candidate?: string | boolean;
+    gender?: string;
     location?: string | string[];
     company_size_ranges?: string | string[];
     company_categories?: string | string[];
@@ -131,6 +147,7 @@ function getSearchInputs(req: Request): SearchInputs {
     skills: normalizeBooleanFilterText(skills),
     designation: normalizeBooleanFilterText(designation),
     femaleCandidate: parseBooleanValue(female_candidate),
+    gender: normalizeGenderValue(gender),
     locations: normalizeLocations(location),
     companySizeRanges: normalizeStringArray(company_size_ranges),
     companyCategories: normalizeStringArray(company_categories),
@@ -158,6 +175,7 @@ async function fetchProfilesByIds(profileIds: number[]) {
       SELECT
         p.id,
         p.full_name,
+        p.gender,
         p.headline,
         p.summary,
         p.picture_url,
@@ -222,6 +240,7 @@ function mapListProfiles(openSearchResult: Awaited<ReturnType<typeof searchProfi
       return {
         id: String(row.id),
         full_name: row.full_name ?? "",
+        gender: row.gender ?? undefined,
         headline: row.headline ?? undefined,
         picture_url: row.picture_url ?? undefined,
         picture_proxy_url: row.picture_url
@@ -687,6 +706,72 @@ export async function proxyProfileImage(req: Request, res: Response) {
   } catch (err) {
     req.log.error({ err }, "Proxy profile image error");
     res.status(500).json({ error: "Failed to fetch image" });
+  }
+}
+
+export async function updateGender(req: Request, res: Response) {
+  const fullName = String(req.body?.fullName ?? "").trim();
+  const gender = normalizeGenderValue(req.body?.gender);
+
+  if (!fullName) {
+    res.status(400).json({ error: "fullName is required" });
+    return;
+  }
+
+  if (!gender) {
+    res.status(400).json({ error: "gender must be male or female" });
+    return;
+  }
+
+  let client: PoolClient | undefined;
+
+  try {
+    client = await linkedinPool.connect();
+    await client.query("BEGIN");
+
+    const updateResult = await client.query<{ id: string }>(
+      `
+      UPDATE linkedin.profiles
+      SET gender = $2
+      WHERE full_name = $1
+      RETURNING id::text AS id
+      `,
+      [fullName, gender]
+    );
+
+    const matchedProfiles = updateResult.rows.length;
+    const matchedProfileIds = updateResult.rows
+      .map((row) => Number(row.id))
+      .filter((id) => Number.isFinite(id));
+
+    if (matchedProfiles === 0) {
+      await client.query("ROLLBACK");
+      res.status(404).json({ error: "No profiles found for this full name" });
+      return;
+    }
+
+    const openSearchSync =
+      matchedProfileIds.length > 0
+        ? await updateProfilesGender(matchedProfileIds, gender)
+        : { updated: 0 };
+
+    await client.query("COMMIT");
+
+    res.json({
+      fullName,
+      gender,
+      matchedProfiles,
+      openSearchUpdated: openSearchSync.updated,
+    });
+  } catch (err) {
+    if (client) {
+      await client.query("ROLLBACK").catch(() => undefined);
+    }
+
+    req.log.error({ err, fullName, gender }, "Update gender error");
+    res.status(500).json({ error: "Failed to update gender" });
+  } finally {
+    client?.release();
   }
 }
 
