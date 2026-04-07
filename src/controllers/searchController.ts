@@ -430,10 +430,11 @@ function getExperienceSummaryFromRows(experiences: ExperienceDateRow[]) {
 async function searchAllProfileIds(inputs: SearchInputs) {
   const profileIds: number[] = [];
   let page = 1;
+  const resolvedInputs = await resolveCompanyDomainInputs(inputs);
 
   while (true) {
     const searchBody = buildProfileSearchQuery({
-      ...inputs,
+      ...resolvedInputs,
       page,
       size: EXPORT_BATCH_SIZE,
     });
@@ -453,6 +454,44 @@ async function searchAllProfileIds(inputs: SearchInputs) {
   }
 
   return profileIds;
+}
+
+async function resolveCompanyDomainInputs(inputs: SearchInputs): Promise<SearchInputs> {
+  if (!inputs.companyCategories || inputs.companyCategories.length === 0) {
+    return inputs;
+  }
+
+  const selectedDomains = Array.from(
+    new Set(
+      inputs.companyCategories
+        .map((domain) => String(domain ?? "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (selectedDomains.length === 0) {
+    return {
+      ...inputs,
+      companyCategories: [],
+    };
+  }
+
+  const categoriesResult = await linkedinPool.query<{ category: string }>(
+    `
+    SELECT DISTINCT btrim(category) AS category
+    FROM linkedin.companies c
+    CROSS JOIN LATERAL unnest(COALESCE(c.company_categories_and_keywords, ARRAY[]::text[])) AS category
+    WHERE COALESCE(c.company_domains, ARRAY[]::text[]) && $1::text[]
+      AND category IS NOT NULL
+      AND btrim(category) <> ''
+    `,
+    [selectedDomains]
+  );
+
+  return {
+    ...inputs,
+    companyCategories: categoriesResult.rows.map((row) => row.category),
+  };
 }
 
 async function fetchExportProfilesByIds(profileIds: number[]) {
@@ -583,7 +622,7 @@ async function fetchExportProfilesByIds(profileIds: number[]) {
 
 export async function listProfiles(req: Request, res: Response) {
   try {
-    const inputs = getSearchInputs(req);
+    const inputs = await resolveCompanyDomainInputs(getSearchInputs(req));
     const searchBody = buildProfileSearchQuery(inputs);
 
     const openSearchResult = await searchProfiles(searchBody);
@@ -616,7 +655,7 @@ export async function listProfiles(req: Request, res: Response) {
 
 export async function downloadProfilesCsv(req: Request, res: Response) {
   try {
-    const inputs = getSearchInputs(req);
+    const inputs = await resolveCompanyDomainInputs(getSearchInputs(req));
 
     const profileIds = await searchAllProfileIds(inputs);
     const rows = await fetchExportProfilesByIds(profileIds);
@@ -1088,32 +1127,32 @@ export async function listCompanyCategories(req: Request, res: Response) {
     const [countResult, categoriesResult] = await Promise.all([
       linkedinPool.query<{ total: string }>(
         `
-        WITH categories AS (
-          SELECT DISTINCT btrim(category) AS category
+        WITH domains AS (
+          SELECT DISTINCT btrim(domain) AS domain
           FROM linkedin.companies c
-          CROSS JOIN LATERAL unnest(COALESCE(c.company_categories_and_keywords, ARRAY[]::text[])) AS category
-          WHERE category IS NOT NULL
-            AND btrim(category) <> ''
-            AND ($1 = '%%' OR btrim(category) ILIKE $1)
+          CROSS JOIN LATERAL unnest(COALESCE(c.company_domains, ARRAY[]::text[])) AS domain
+          WHERE domain IS NOT NULL
+            AND btrim(domain) <> ''
+            AND ($1 = '%%' OR btrim(domain) ILIKE $1)
         )
         SELECT COUNT(*)::text AS total
-        FROM categories
+        FROM domains
         `,
         [searchPattern]
       ),
-      linkedinPool.query<{ category: string }>(
+      linkedinPool.query<{ domain: string }>(
         `
-        WITH categories AS (
-          SELECT DISTINCT btrim(category) AS category
+        WITH domains AS (
+          SELECT DISTINCT btrim(domain) AS domain
           FROM linkedin.companies c
-          CROSS JOIN LATERAL unnest(COALESCE(c.company_categories_and_keywords, ARRAY[]::text[])) AS category
-          WHERE category IS NOT NULL
-            AND btrim(category) <> ''
-            AND ($3 = '%%' OR btrim(category) ILIKE $3)
+          CROSS JOIN LATERAL unnest(COALESCE(c.company_domains, ARRAY[]::text[])) AS domain
+          WHERE domain IS NOT NULL
+            AND btrim(domain) <> ''
+            AND ($3 = '%%' OR btrim(domain) ILIKE $3)
         )
-        SELECT category
-        FROM categories
-        ORDER BY category ASC
+        SELECT domain
+        FROM domains
+        ORDER BY domain ASC
         LIMIT $1 OFFSET $2
         `,
         [COMPANY_CATEGORY_PAGE_SIZE, offset, searchPattern]
@@ -1122,7 +1161,7 @@ export async function listCompanyCategories(req: Request, res: Response) {
 
     const total = Number(countResult.rows[0]?.total ?? 0);
     const totalPages = total > 0 ? Math.ceil(total / COMPANY_CATEGORY_PAGE_SIZE) : 0;
-    const companyCategories = categoriesResult.rows.map((row) => row.category);
+    const companyCategories = categoriesResult.rows.map((row) => row.domain);
 
     res.json({
       companyCategories:

@@ -13,6 +13,7 @@ module.exports = (sequelize, DataTypes) => {
         company_size_range: DataTypes.TEXT,
         company_employees_count: DataTypes.TEXT,
         company_industry: DataTypes.TEXT,
+        company_domains: DataTypes.ARRAY(DataTypes.TEXT),
         company_categories_and_keywords: DataTypes.ARRAY(DataTypes.TEXT),
         company_annual_revenue_source_1: DataTypes.TEXT,
         company_annual_revenue_currency_source_1: DataTypes.TEXT,

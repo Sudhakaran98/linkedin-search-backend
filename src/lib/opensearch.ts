@@ -83,14 +83,14 @@ export async function searchProfiles(body: Record<string, unknown>) {
   const maxScore = response.body?.hits?.max_score ?? 0;
   const hits = response.body?.hits?.hits ?? [];
 
-  console.log(
-    "OpenSearch raw hit sample:",
-    hits.slice(0, 3).map((hit) => ({
-      _id: hit._id,
-      _score: hit._score,
-      _source: hit._source,
-    }))
-  );
+  // console.log(
+  //   "OpenSearch raw hit sample:",
+  //   hits.slice(0, 3).map((hit) => ({
+  //     _id: hit._id,
+  //     _score: hit._score,
+  //     _source: hit._source,
+  //   }))
+  // );
 
   return {
     total,
