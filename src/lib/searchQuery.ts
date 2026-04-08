@@ -168,7 +168,7 @@ type SearchQueryParams = {
   gender?: (typeof SUPPORTED_GENDERS)[number];
   locations?: string[];
   companySizeRanges?: string[];
-  companyCategories?: string[];
+  companyDomains?: string[];
   companyCategoryScope?: "current" | "past";
   minExperience?: number;
   maxExperience?: number;
@@ -188,7 +188,7 @@ export function buildProfileSearchQuery({
   gender,
   locations,
   companySizeRanges,
-  companyCategories,
+  companyDomains,
   companyCategoryScope,
   minExperience,
   maxExperience,
@@ -261,10 +261,10 @@ export function buildProfileSearchQuery({
       ?.map((range) => COMPANY_SIZE_RANGE_MAP[range])
       .filter((range): range is { min: number; max?: number } => Boolean(range)) ?? [];
 
-  const selectedCompanyCategories =
-    companyCategories
-      ?.map((category) => category.trim())
-      .filter((category) => Boolean(category) && !isSelectAllFilterValue(category)) ?? [];
+  const selectedCompanyDomains =
+    companyDomains
+      ?.map((domain) => domain.trim())
+      .filter((domain) => Boolean(domain) && !isSelectAllFilterValue(domain)) ?? [];
 
   if (selectedCompanySizeRanges.length > 0) {
     filter.push({
@@ -317,7 +317,7 @@ export function buildProfileSearchQuery({
     });
   }
 
-  if (selectedCompanyCategories.length > 0) {
+  if (selectedCompanyDomains.length > 0) {
     const companyCategoryScopeFilter =
       companyCategoryScope === "past"
         ? {
@@ -342,7 +342,7 @@ export function buildProfileSearchQuery({
               companyCategoryScopeFilter,
               {
                 terms: {
-                  "experiences.company_categories_and_keywords": selectedCompanyCategories,
+                  "experiences.ext_company_domains": selectedCompanyDomains,
                 },
               },
             ],

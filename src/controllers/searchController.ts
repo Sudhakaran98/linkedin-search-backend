@@ -37,7 +37,7 @@ type SearchInputs = {
   gender?: (typeof SUPPORTED_GENDERS)[number];
   locations?: string[];
   companySizeRanges?: string[];
-  companyCategories?: string[];
+  companyDomains?: string[];
   companyCategoryScope?: "current" | "past";
   minExperience?: number;
   maxExperience?: number;
@@ -121,6 +121,7 @@ function getSearchInputs(req: Request): SearchInputs {
     gender,
     location,
     company_size_ranges,
+    company_domains,
     company_categories,
     company_category_scope,
     min_experience,
@@ -133,6 +134,7 @@ function getSearchInputs(req: Request): SearchInputs {
     gender?: string;
     location?: string | string[];
     company_size_ranges?: string | string[];
+    company_domains?: string | string[];
     company_categories?: string | string[];
     company_category_scope?: string;
     min_experience?: string | number;
@@ -150,7 +152,7 @@ function getSearchInputs(req: Request): SearchInputs {
     gender: normalizeGenderValue(gender),
     locations: normalizeLocations(location),
     companySizeRanges: normalizeStringArray(company_size_ranges),
-    companyCategories: normalizeStringArray(company_categories),
+    companyDomains: normalizeStringArray(company_domains ?? company_categories),
     companyCategoryScope: normalizeCompanyCategoryScope(company_category_scope),
     minExperience:
       minExperience !== undefined && maxExperience !== undefined
@@ -432,11 +434,10 @@ function getExperienceSummaryFromRows(experiences: ExperienceDateRow[]) {
 async function searchAllProfileIds(inputs: SearchInputs) {
   const profileIds: number[] = [];
   let page = 1;
-  const resolvedInputs = await resolveCompanyDomainInputs(inputs);
 
   while (true) {
     const searchBody = buildProfileSearchQuery({
-      ...resolvedInputs,
+      ...inputs,
       page,
       size: EXPORT_BATCH_SIZE,
     });
@@ -456,44 +457,6 @@ async function searchAllProfileIds(inputs: SearchInputs) {
   }
 
   return profileIds;
-}
-
-async function resolveCompanyDomainInputs(inputs: SearchInputs): Promise<SearchInputs> {
-  if (!inputs.companyCategories || inputs.companyCategories.length === 0) {
-    return inputs;
-  }
-
-  const selectedDomains = Array.from(
-    new Set(
-      inputs.companyCategories
-        .map((domain) => String(domain ?? "").trim())
-        .filter(Boolean)
-    )
-  );
-
-  if (selectedDomains.length === 0) {
-    return {
-      ...inputs,
-      companyCategories: [],
-    };
-  }
-
-  const categoriesResult = await linkedinPool.query<{ category: string }>(
-    `
-    SELECT DISTINCT btrim(category) AS category
-    FROM linkedin.companies c
-    CROSS JOIN LATERAL unnest(COALESCE(c.company_categories_and_keywords, ARRAY[]::text[])) AS category
-    WHERE COALESCE(c.company_domains, ARRAY[]::text[]) && $1::text[]
-      AND category IS NOT NULL
-      AND btrim(category) <> ''
-    `,
-    [selectedDomains]
-  );
-
-  return {
-    ...inputs,
-    companyCategories: categoriesResult.rows.map((row) => row.category),
-  };
 }
 
 async function fetchExportProfilesByIds(profileIds: number[]) {
@@ -624,7 +587,7 @@ async function fetchExportProfilesByIds(profileIds: number[]) {
 
 export async function listProfiles(req: Request, res: Response) {
   try {
-    const inputs = await resolveCompanyDomainInputs(getSearchInputs(req));
+    const inputs = getSearchInputs(req);
     const searchBody = buildProfileSearchQuery(inputs);
 
     const openSearchResult = await searchProfiles(searchBody);
@@ -657,7 +620,7 @@ export async function listProfiles(req: Request, res: Response) {
 
 export async function downloadProfilesCsv(req: Request, res: Response) {
   try {
-    const inputs = await resolveCompanyDomainInputs(getSearchInputs(req));
+    const inputs = getSearchInputs(req);
 
     const profileIds = await searchAllProfileIds(inputs);
     const rows = await fetchExportProfilesByIds(profileIds);
