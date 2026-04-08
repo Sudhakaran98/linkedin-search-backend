@@ -175,6 +175,7 @@ async function fetchProfilesByIds(profileIds: number[]) {
       SELECT
         p.id,
         p.full_name,
+        p.first_name,
         p.gender,
         p.headline,
         p.summary,
@@ -240,6 +241,7 @@ function mapListProfiles(openSearchResult: Awaited<ReturnType<typeof searchProfi
       return {
         id: String(row.id),
         full_name: row.full_name ?? "",
+        first_name: row.first_name ?? "",
         gender: row.gender ?? undefined,
         headline: row.headline ?? undefined,
         picture_url: row.picture_url ?? undefined,
@@ -749,11 +751,11 @@ export async function proxyProfileImage(req: Request, res: Response) {
 }
 
 export async function updateGender(req: Request, res: Response) {
-  const fullName = String(req.body?.fullName ?? "").trim();
+  const firstName = String(req.body?.firstName ?? "").trim();
   const gender = normalizeGenderValue(req.body?.gender);
 
-  if (!fullName) {
-    res.status(400).json({ error: "fullName is required" });
+  if (!firstName) {
+    res.status(400).json({ error: "firstName is required" });
     return;
   }
 
@@ -772,10 +774,10 @@ export async function updateGender(req: Request, res: Response) {
       `
       UPDATE linkedin.profiles
       SET gender = $2
-      WHERE full_name = $1
+      WHERE first_name = $1
       RETURNING id::text AS id
       `,
-      [fullName, gender]
+      [firstName, gender]
     );
 
     const matchedProfiles = updateResult.rows.length;
@@ -785,7 +787,7 @@ export async function updateGender(req: Request, res: Response) {
 
     if (matchedProfiles === 0) {
       await client.query("ROLLBACK");
-      res.status(404).json({ error: "No profiles found for this full name" });
+      res.status(404).json({ error: "No profiles found for this first name" });
       return;
     }
 
@@ -797,7 +799,7 @@ export async function updateGender(req: Request, res: Response) {
     await client.query("COMMIT");
 
     res.json({
-      fullName,
+      firstName,
       gender,
       matchedProfiles,
       openSearchUpdated: openSearchSync.updated,
@@ -807,7 +809,7 @@ export async function updateGender(req: Request, res: Response) {
       await client.query("ROLLBACK").catch(() => undefined);
     }
 
-    req.log.error({ err, fullName, gender }, "Update gender error");
+    req.log.error({ err, firstName, gender }, "Update gender error");
     res.status(500).json({ error: "Failed to update gender" });
   } finally {
     client?.release();
