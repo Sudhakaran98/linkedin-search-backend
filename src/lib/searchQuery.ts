@@ -2,6 +2,42 @@ export const PAGE_SIZE = 10;
 export const EXPORT_BATCH_SIZE = 1000;
 export const SELECT_ALL_FILTER_VALUE = "Select All";
 export const SUPPORTED_GENDERS = ["male", "female"] as const;
+export const TOP_COMPANY_PROFILE_KEYWORDS = [
+  '"Senior Software"',
+  "Staff",
+  "Principle",
+  "Architect",
+  "SDE",
+  "I",
+  "2",
+  "3",
+  "4",
+  "II",
+  "III",
+  "IV",
+  "ML",
+  "Machine",
+  "Data",
+] as const;
+export const TOP_COMPANY_PROFILE_COMPANIES = [
+  "Meta",
+  "Apple",
+  "Amazon",
+  "Microsoft",
+  "Uber",
+  "Google",
+] as const;
+export const TOP_COMPANY_PROFILE_ORDER_IN_PROFILE = [1, 2] as const;
+export const TOP_COMPANY_PROFILE_MIN_EXPERIENCE = 4;
+export const TOP_COMPANY_PROFILE_LOCATIONS = [
+  "Bengaluru Rural District, Karnataka, India",
+  "Bengaluru, Karnataka, India",
+  "Bengaluru North, Karnataka, India",
+  "Bengaluru South, Karnataka, India",
+  "Bengaluru East, Karnataka, India",
+  "Bengaluru Rural, Karnataka, India",
+  "Greater Bengaluru Area",
+] as const;
 
 const FEMALE_CANDIDATE_NAME_REGEX = ".*[aiy]";
 
@@ -404,6 +440,67 @@ export function buildProfileSearchQuery({
     size,
     track_total_hits: true,
     query,
+  };
+}
+
+export function buildTopCompanyProfilesQuery(page: number, size = PAGE_SIZE) {
+  const from = Math.max(0, (page - 1) * size);
+
+  return {
+    from,
+    size,
+    track_total_hits: true,
+    query: {
+      bool: {
+        must: [
+          {
+            query_string: {
+              query: TOP_COMPANY_PROFILE_KEYWORDS.join(" OR "),
+              fields: [...PROFILE_SEARCH_FIELDS],
+              default_operator: "OR",
+            },
+          },
+          {
+            nested: {
+              path: "experiences",
+              query: {
+                bool: {
+                  filter: [
+                    {
+                      terms: {
+                        "experiences.order_in_profile": [
+                          ...TOP_COMPANY_PROFILE_ORDER_IN_PROFILE,
+                        ],
+                      },
+                    },
+                  ],
+                  should: TOP_COMPANY_PROFILE_COMPANIES.map((companyName) => ({
+                    match_phrase: {
+                      "experiences.company_name": companyName,
+                    },
+                  })),
+                  minimum_should_match: 1,
+                },
+              },
+            },
+          },
+        ],
+        filter: [
+          {
+            range: {
+              total_years_exp: {
+                gte: TOP_COMPANY_PROFILE_MIN_EXPERIENCE,
+              },
+            },
+          },
+          {
+            terms: {
+              "location_full.keyword": [...TOP_COMPANY_PROFILE_LOCATIONS],
+            },
+          },
+        ],
+      },
+    },
   };
 }
 

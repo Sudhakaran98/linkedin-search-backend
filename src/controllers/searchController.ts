@@ -1,8 +1,9 @@
 import { type Request, type Response } from "express";
 import { type PoolClient } from "pg";
 import linkedinPool from "../lib/db.js";
-import { searchProfiles, updateProfilesGender } from "../lib/opensearch.js";
+import { scrollProfileIds, searchProfiles, updateProfilesGender } from "../lib/opensearch.js";
 import {
+  buildTopCompanyProfilesQuery,
   buildProfileSearchQuery,
   EXPORT_BATCH_SIZE,
   normalizeScore,
@@ -185,7 +186,10 @@ async function fetchProfilesByIds(profileIds: number[]) {
         p.location_full,
         p.location_city,
         p.location_country,
-        p.linkedin_url
+        p.linkedin_url,
+        p.salesql_emails,
+        p.salesql_phones,
+        p.salesql_enriched_at
       FROM linkedin.profiles p
       WHERE p.id = ANY($1::bigint[])
       `,
@@ -263,6 +267,9 @@ function mapListProfiles(openSearchResult: Awaited<ReturnType<typeof searchProfi
         total_experience_duration_months:
           row.total_experience_duration_months ?? undefined,
         linkedin_url: row.linkedin_url ?? undefined,
+        salesql_emails: row.salesql_emails ?? undefined,
+        salesql_phones: row.salesql_phones ?? undefined,
+        salesql_enriched_at: row.salesql_enriched_at ?? undefined,
         score: {
           raw: hit.score,
           normalized: normalizeScore(hit.score, openSearchResult.maxScore),
@@ -585,6 +592,185 @@ async function fetchExportProfilesByIds(profileIds: number[]) {
   return aggregated;
 }
 
+async function fetchTopCompanyExportProfilesByIds(profileIds: number[]) {
+  if (profileIds.length === 0) {
+    return [];
+  }
+
+  const profilesById = new Map<
+    number,
+    {
+      id: number;
+      full_name?: string | null;
+      first_name?: string | null;
+      headline?: string | null;
+      picture_url?: string | null;
+      location_full?: string | null;
+      location_city?: string | null;
+      location_country?: string | null;
+      linkedin_url?: string | null;
+      summary?: string | null;
+      active_experience_title?: string | null;
+      active_experience_company_name?: string | null;
+      current_experience_label?: string | null;
+      past_experience_labels?: string[];
+      total_experience_duration_months?: number | null;
+      institution_names: Set<string>;
+    }
+  >();
+  const experiencesById = new Map<number, ExperienceDateRow[]>();
+
+  const batches = chunkArray(profileIds, EXPORT_PG_BATCH_SIZE);
+
+  for (const batchProfileIds of batches) {
+    const [profilesResult, experiencesResult, educationsResult] = await Promise.all([
+      linkedinPool.query(
+        `
+        SELECT
+          p.id,
+          p.full_name,
+          p.first_name,
+          p.headline,
+          p.picture_url,
+          p.location_full,
+          p.location_city,
+          p.location_country,
+          p.linkedin_url,
+          p.summary
+        FROM linkedin.profiles p
+        WHERE p.id = ANY($1::bigint[])
+        `,
+        [batchProfileIds]
+      ),
+      linkedinPool.query(
+        `
+        SELECT
+          e.profile_id AS id,
+          e.position_title,
+          e.company_name,
+          e.active_experience,
+          e.order_in_profile,
+          e.date_from_year,
+          e.date_from_month,
+          e.date_to_year,
+          e.date_to_month
+        FROM linkedin.profile_experiences e
+        WHERE e.profile_id = ANY($1::bigint[])
+        ORDER BY e.profile_id ASC, e.order_in_profile ASC
+        `,
+        [batchProfileIds]
+      ),
+      linkedinPool.query(
+        `
+        SELECT
+          e.profile_id AS id,
+          e.institution_name
+        FROM linkedin.profile_educations e
+        WHERE e.profile_id = ANY($1::bigint[])
+          AND e.institution_name IS NOT NULL
+        ORDER BY e.profile_id ASC, e.order_in_profile ASC
+        `,
+        [batchProfileIds]
+      ),
+    ]);
+
+    for (const row of profilesResult.rows) {
+      const id = Number(row.id);
+      if (!Number.isFinite(id)) {
+        continue;
+      }
+
+      let profile = profilesById.get(id);
+      if (!profile) {
+        profile = {
+          id,
+          full_name: row.full_name ?? null,
+          first_name: row.first_name ?? null,
+          headline: row.headline ?? null,
+          picture_url: row.picture_url ?? null,
+          location_full: row.location_full ?? null,
+          location_city: row.location_city ?? null,
+          location_country: row.location_country ?? null,
+          linkedin_url: row.linkedin_url ?? null,
+          summary: row.summary ?? null,
+          active_experience_title: undefined,
+          active_experience_company_name: undefined,
+          current_experience_label: undefined,
+          past_experience_labels: [],
+          total_experience_duration_months: undefined,
+          institution_names: new Set<string>(),
+        };
+        profilesById.set(id, profile);
+      }
+    }
+
+    for (const row of experiencesResult.rows) {
+      const id = Number(row.id);
+      if (!Number.isFinite(id)) {
+        continue;
+      }
+
+      const experienceRows = experiencesById.get(id) ?? [];
+      experienceRows.push(row);
+      experiencesById.set(id, experienceRows);
+    }
+
+    for (const row of educationsResult.rows) {
+      const id = Number(row.id);
+      if (!Number.isFinite(id)) {
+        continue;
+      }
+
+      const profile = profilesById.get(id);
+      if (!profile) {
+        continue;
+      }
+
+      const institutionName = String(row.institution_name ?? "").trim();
+      if (institutionName) {
+        profile.institution_names.add(institutionName);
+      }
+    }
+  }
+
+  return profileIds
+    .map((profileId) => {
+      const profile = profilesById.get(profileId);
+      if (!profile) {
+        return null;
+      }
+
+      const experienceSummary = getExperienceSummaryFromRows(
+        experiencesById.get(profile.id) ?? []
+      );
+      const pictureUrl = profile.picture_url ?? "";
+
+      return {
+        id: profile.id,
+        full_name: profile.full_name ?? "",
+        first_name: profile.first_name ?? "",
+        headline: profile.headline ?? "",
+        picture_url: pictureUrl,
+        picture_proxy_url: pictureUrl
+          ? `/api/search/profile-image?url=${encodeURIComponent(pictureUrl)}`
+          : "",
+        location_full: profile.location_full ?? "",
+        location_city: profile.location_city ?? "",
+        location_country: profile.location_country ?? "",
+        active_experience_title: experienceSummary.active_experience_title ?? "",
+        active_experience_company_name: experienceSummary.active_experience_company_name ?? "",
+        current_experience_label: experienceSummary.current_experience_label ?? "",
+        past_experience_labels: (experienceSummary.past_experience_labels ?? []).join(" | "),
+        summary: profile.summary ?? "",
+        total_experience_duration_months:
+          experienceSummary.total_experience_duration_months ?? "",
+        linkedin_url: profile.linkedin_url ?? "",
+        institution_name: Array.from(profile.institution_names).join(" | "),
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => Boolean(row));
+}
+
 export async function listProfiles(req: Request, res: Response) {
   try {
     const inputs = getSearchInputs(req);
@@ -615,6 +801,103 @@ export async function listProfiles(req: Request, res: Response) {
   } catch (err) {
     req.log.error({ err }, "List profiles error");
     res.status(500).json({ error: "Search failed" });
+  }
+}
+
+export async function listTopCompanyProfiles(req: Request, res: Response) {
+  try {
+    const header = [
+      "full_name",
+      "first_name",
+      "headline",
+      "picture_url",
+      "picture_proxy_url",
+      "location_full",
+      "location_city",
+      "location_country",
+      "active_experience_title",
+      "active_experience_company_name",
+      "current_experience_label",
+      "past_experience_labels",
+      "summary",
+      "total_experience_duration_months",
+      "linkedin_url",
+      "institution_name",
+    ];
+    const csvLines = [header.join(",")];
+    let total = 0;
+    let processedProfiles = 0;
+
+    const searchBody = buildTopCompanyProfilesQuery(1, EXPORT_BATCH_SIZE);
+
+    const scrollResult = await scrollProfileIds(
+      searchBody,
+      EXPORT_BATCH_SIZE,
+      async ({ total: batchTotal, batchHits }) => {
+        if (total === 0) {
+          total = batchTotal;
+          req.log.info({ total }, "Top company profiles total matched");
+        }
+
+        const profileIds = batchHits
+          .map((hit) => hit.id)
+          .filter((id) => Number.isFinite(id));
+
+        if (profileIds.length === 0) {
+          return;
+        }
+
+        const rows = await fetchTopCompanyExportProfilesByIds(profileIds);
+        for (const row of rows) {
+          csvLines.push(
+            [
+              row.full_name,
+              row.first_name,
+              row.headline,
+              row.picture_url,
+              row.picture_proxy_url,
+              row.location_full,
+              row.location_city,
+              row.location_country,
+              row.active_experience_title,
+              row.active_experience_company_name,
+              row.current_experience_label,
+              row.past_experience_labels,
+              row.summary,
+              row.total_experience_duration_months,
+              row.linkedin_url,
+              row.institution_name,
+            ]
+              .map(escapeCsvCell)
+              .join(",")
+          );
+        }
+
+        processedProfiles += rows.length;
+        req.log.info(
+          { processedProfiles, total },
+          "Processed top company profile export batch"
+        );
+      }
+    );
+
+    if (total === 0) {
+      total = scrollResult.total;
+      req.log.info({ total }, "Top company profiles total matched");
+    }
+
+    const csv = csvLines.join("\n");
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("X-Total-Count", String(total));
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="top-company-profiles-export.csv"'
+    );
+    res.send(csv);
+  } catch (err) {
+    req.log.error({ err }, "Export top company profiles error");
+    res.status(500).json({ error: "Failed to export profiles" });
   }
 }
 
@@ -789,7 +1072,8 @@ export async function getProfileDetails(req: Request, res: Response) {
         p.id, p.full_name, p.headline, p.picture_url,
         p.location_full, p.location_city, p.location_country,
         p.summary, p.linkedin_url, p.activity,
-        p.connections_count, p.followers_count
+        p.connections_count, p.followers_count,
+        p.salesql_emails, p.salesql_phones, p.salesql_enriched_at
       FROM linkedin.profiles p
       WHERE p.id = $1
       `,
@@ -910,6 +1194,9 @@ export async function getProfileDetails(req: Request, res: Response) {
       linkedin_url: row.linkedin_url ?? undefined,
       connections_count: row.connections_count ?? undefined,
       followers_count: row.followers_count ?? undefined,
+      salesql_emails: row.salesql_emails ?? undefined,
+      salesql_phones: row.salesql_phones ?? undefined,
+      salesql_enriched_at: row.salesql_enriched_at ?? undefined,
       active_experience_title: currentExperience.active_experience_title,
       active_experience_company_name: currentExperience.active_experience_company_name,
       total_experience_duration_months: totalExperienceDurationMonths,
@@ -1032,6 +1319,100 @@ export async function getProfileDetails(req: Request, res: Response) {
     req.log.error({ err }, "Profile detail error");
     res.status(500).json({ error: "Failed to fetch profile" });
   }
+}
+
+export async function enrichProfiles(req: Request, res: Response) {
+  const body = req.body as { linkedin_urls?: unknown };
+
+  if (!Array.isArray(body.linkedin_urls) || body.linkedin_urls.length === 0) {
+    res.status(400).json({ error: "linkedin_urls array is required" });
+    return;
+  }
+
+  const linkedinUrls = (body.linkedin_urls as unknown[])
+    .map((url) => String(url ?? "").trim())
+    .filter(Boolean);
+
+  const SALESQL_API_KEY =
+    process.env.SALESQL_API_KEY ?? "6g86ez7Fi621GkeUMIXilmDd6DgcYN2W";
+
+  const cachedResult = await linkedinPool.query<{
+    linkedin_url: string;
+    salesql_emails: Record<string, unknown>[] | null;
+    salesql_phones: Record<string, unknown>[] | null;
+  }>(
+    `SELECT linkedin_url, salesql_emails, salesql_phones
+     FROM linkedin.profiles
+     WHERE linkedin_url = ANY($1::text[]) AND salesql_enriched_at IS NOT NULL`,
+    [linkedinUrls]
+  );
+
+  const alreadyEnriched = new Map(
+    cachedResult.rows.map((row) => [row.linkedin_url, row])
+  );
+
+  const enrichmentResults: Record<string, unknown> = {};
+
+  for (const linkedinUrl of linkedinUrls) {
+    const cached = alreadyEnriched.get(linkedinUrl);
+    if (cached) {
+      console.log(`[SalesQL] Skipping API call for ${linkedinUrl} — already enriched (no credit used)`);
+      enrichmentResults[linkedinUrl] = {
+        emails: cached.salesql_emails ?? [],
+        phones: cached.salesql_phones ?? [],
+        cached: true,
+      };
+      continue;
+    }
+
+    try {
+      const apiUrl = `https://api-public.salesql.com/v1/persons/enrich?linkedin_url=${encodeURIComponent(linkedinUrl)}`;
+      const salesqlResponse = await fetch(apiUrl, {
+        headers: {
+          Authorization: `Bearer ${SALESQL_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      });
+
+      const rawText = await salesqlResponse.text();
+
+      console.log(`\n========== [SalesQL] ==========`);
+      console.log(`LinkedIn URL : ${linkedinUrl}`);
+      console.log(`HTTP Status  : ${salesqlResponse.status}`);
+      console.log(`All fields   :\n${rawText}`);
+      console.log(`================================\n`);
+
+      const data = JSON.parse(rawText) as Record<string, unknown>;
+
+      req.log.info(
+        { linkedinUrl, statusCode: salesqlResponse.status, salesqlResponse: data },
+        "SalesQL API response"
+      );
+
+      const emailsRaw = Array.isArray(data?.emails) ? data.emails as Record<string, unknown>[] : [];
+      const phonesRaw = Array.isArray(data?.phones) ? data.phones as Record<string, unknown>[] : [];
+
+      await linkedinPool.query(
+        `
+        UPDATE linkedin.profiles
+        SET salesql_emails = $2::jsonb,
+            salesql_phones = $3::jsonb,
+            salesql_enriched_at = NOW(),
+            salesql_profile_response = $4::jsonb
+        WHERE linkedin_url = $1
+        `,
+        [linkedinUrl, JSON.stringify(emailsRaw), JSON.stringify(phonesRaw), JSON.stringify(data)]
+      );
+
+      enrichmentResults[linkedinUrl] = { emails: emailsRaw, phones: phonesRaw };
+    } catch (err) {
+      req.log.error({ err, linkedinUrl }, "SalesQL enrichment failed");
+      console.error(`[SalesQL] Error for ${linkedinUrl}:`, err);
+      enrichmentResults[linkedinUrl] = { error: String(err), emails: [], phones: [] };
+    }
+  }
+
+  res.json({ results: enrichmentResults });
 }
 
 export async function listLocations(req: Request, res: Response) {

@@ -45,7 +45,9 @@ type OpenSearchHit = {
 };
 
 type OpenSearchSearchResponse = {
+  _scroll_id?: string;
   body?: {
+    _scroll_id?: string;
     hits?: {
       total?: {
         value?: number;
@@ -56,6 +58,8 @@ type OpenSearchSearchResponse = {
     };
   };
 };
+
+type OpenSearchScrollResponse = OpenSearchSearchResponse;
 
 type OpenSearchUpdateByQueryResponse = {
   body?: {
@@ -104,6 +108,76 @@ export async function searchProfiles(body: Record<string, unknown>) {
       score: hit._score ?? 0,
     })),
   };
+}
+
+function mapOpenSearchHits(hits: OpenSearchHit[]) {
+  return hits.map((hit) => ({
+    id:
+      Number(hit._source?.profile_id) ||
+      Number(hit._source?.public_profile_id) ||
+      Number(hit._source?.id) ||
+      Number(hit._id),
+    score: hit._score ?? 0,
+  }));
+}
+
+export async function scrollProfileIds(
+  body: Record<string, unknown>,
+  batchSize: number,
+  onBatch: (payload: {
+    total: number;
+    batchHits: Array<{ id: number; score: number }>;
+  }) => Promise<void>
+) {
+  let scrollId: string | undefined;
+
+  try {
+    const initialResponse = (await osClient.search({
+      index: OPEN_SEARCH_INDEX,
+      scroll: "2m",
+      body: {
+        ...body,
+        size: batchSize,
+        sort: ["_doc"],
+      },
+    })) as OpenSearchSearchResponse;
+
+    scrollId = initialResponse.body?._scroll_id ?? initialResponse._scroll_id;
+
+    let total = initialResponse.body?.hits?.total?.value ?? 0;
+    let hits = mapOpenSearchHits(initialResponse.body?.hits?.hits ?? []);
+
+    while (hits.length > 0) {
+      await onBatch({ total, batchHits: hits });
+
+      if (!scrollId) {
+        break;
+      }
+
+      const scrollResponse = (await osClient.scroll({
+        scroll: "2m",
+        body: {
+          scroll_id: scrollId,
+        },
+      })) as OpenSearchScrollResponse;
+
+      scrollId = scrollResponse.body?._scroll_id ?? scrollResponse._scroll_id ?? scrollId;
+      total = scrollResponse.body?.hits?.total?.value ?? total;
+      hits = mapOpenSearchHits(scrollResponse.body?.hits?.hits ?? []);
+    }
+
+    return { total };
+  } finally {
+    if (scrollId) {
+      await osClient
+        .clearScroll({
+          body: {
+            scroll_id: [scrollId],
+          },
+        })
+        .catch(() => undefined);
+    }
+  }
 }
 
 export async function updateProfilesGender(
