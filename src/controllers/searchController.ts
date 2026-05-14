@@ -901,11 +901,159 @@ export async function listTopCompanyProfiles(req: Request, res: Response) {
   }
 }
 
+type SalesqlEmailRow = { email?: string; type?: string; status?: string };
+type SalesqlPhoneRow = { phone?: string; type?: string; country_code?: string };
+
+function formatSalesqlEmails(emails: SalesqlEmailRow[]): string {
+  return emails
+    .map((e) => [e.email, e.type, e.status].filter(Boolean).join(" | "))
+    .join("; ");
+}
+
+function formatSalesqlPhones(phones: SalesqlPhoneRow[]): string {
+  return phones
+    .map((p) => [p.phone, p.type, p.country_code].filter(Boolean).join(" | "))
+    .join("; ");
+}
+
+async function fetchSalesqlExportProfilesByIds(profileIds: number[]) {
+  if (profileIds.length === 0) {
+    return [];
+  }
+
+  const profilesById = new Map<
+    number,
+    {
+      id: number;
+      full_name?: string | null;
+      headline?: string | null;
+      location_full?: string | null;
+      linkedin_url?: string | null;
+      salesql_emails: SalesqlEmailRow[];
+      salesql_phones: SalesqlPhoneRow[];
+    }
+  >();
+  const experiencesById = new Map<number, ExperienceDateRow[]>();
+
+  const batches = chunkArray(profileIds, EXPORT_PG_BATCH_SIZE);
+
+  for (const batchProfileIds of batches) {
+    const [profilesResult, experiencesResult] = await Promise.all([
+      linkedinPool.query(
+        `
+        SELECT
+          p.id,
+          p.full_name,
+          p.headline,
+          p.location_full,
+          p.linkedin_url,
+          p.salesql_emails,
+          p.salesql_phones
+        FROM linkedin.profiles p
+        WHERE p.id = ANY($1::bigint[])
+          AND p.salesql_enriched_at IS NOT NULL
+        `,
+        [batchProfileIds]
+      ),
+      linkedinPool.query(
+        `
+        SELECT
+          e.profile_id AS id,
+          e.position_title,
+          e.company_name,
+          e.active_experience,
+          e.order_in_profile,
+          e.date_from_year,
+          e.date_from_month,
+          e.date_to_year,
+          e.date_to_month
+        FROM linkedin.profile_experiences e
+        WHERE e.profile_id = ANY($1::bigint[])
+        ORDER BY e.profile_id ASC, e.order_in_profile ASC
+        `,
+        [batchProfileIds]
+      ),
+    ]);
+
+    for (const row of profilesResult.rows) {
+      const id = Number(row.id);
+      if (!Number.isFinite(id)) continue;
+      profilesById.set(id, {
+        id,
+        full_name: row.full_name ?? null,
+        headline: row.headline ?? null,
+        location_full: row.location_full ?? null,
+        linkedin_url: row.linkedin_url ?? null,
+        salesql_emails: Array.isArray(row.salesql_emails) ? row.salesql_emails : [],
+        salesql_phones: Array.isArray(row.salesql_phones) ? row.salesql_phones : [],
+      });
+    }
+
+    for (const row of experiencesResult.rows) {
+      const id = Number(row.id);
+      if (!Number.isFinite(id)) continue;
+      const exp = experiencesById.get(id) ?? [];
+      exp.push(row);
+      experiencesById.set(id, exp);
+    }
+  }
+
+  return Array.from(profilesById.values()).map((profile) => {
+    const exps = experiencesById.get(profile.id) ?? [];
+    const currentExp = getCurrentExperienceFromRows(exps);
+    return {
+      ...profile,
+      ...currentExp,
+      total_experience_duration_months: calculateExperienceDurationMonths(exps),
+    };
+  });
+}
+
 export async function downloadProfilesCsv(req: Request, res: Response) {
   try {
     const inputs = getSearchInputs(req);
+    const downloadType = String((req.body as Record<string, unknown>).download_type ?? "all").trim();
 
     const profileIds = await searchAllProfileIds(inputs);
+
+    if (downloadType === "salesql") {
+      const rows = await fetchSalesqlExportProfilesByIds(profileIds);
+
+      const header = [
+        "profile_id",
+        "full_name",
+        "headline",
+        "location_full",
+        "total_experience",
+        "current_experience",
+        "linkedin_url",
+        "emails",
+        "phones",
+      ];
+
+      const csvRows = rows.map((row) =>
+        [
+          row.id,
+          row.full_name ?? "",
+          row.headline ?? "",
+          row.location_full ?? "",
+          formatDuration(row.total_experience_duration_months),
+          formatCurrentExperience(row),
+          row.linkedin_url ?? "",
+          formatSalesqlEmails(row.salesql_emails),
+          formatSalesqlPhones(row.salesql_phones),
+        ]
+          .map(escapeCsvCell)
+          .join(",")
+      );
+
+      const csv = [header.join(","), ...csvRows].join("\n");
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", 'attachment; filename="salesql-profiles-export.csv"');
+      res.send(csv);
+      return;
+    }
+
     const rows = await fetchExportProfilesByIds(profileIds);
     const rowById = new Map(rows.map((row) => [Number(row.id), row]));
 
@@ -924,9 +1072,7 @@ export async function downloadProfilesCsv(req: Request, res: Response) {
     const csvRows = profileIds
       .map((profileId) => {
         const row = rowById.get(profileId);
-        if (!row) {
-          return null;
-        }
+        if (!row) return null;
 
         return [
           profileId,
@@ -945,12 +1091,8 @@ export async function downloadProfilesCsv(req: Request, res: Response) {
       .filter((row): row is string => Boolean(row));
 
     const csv = [header.join(","), ...csvRows].join("\n");
-
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="profiles-export.csv"'
-    );
+    res.setHeader("Content-Disposition", 'attachment; filename="profiles-export.csv"');
     res.send(csv);
   } catch (err) {
     req.log.error({ err }, "Download profiles error");
