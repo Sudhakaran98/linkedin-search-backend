@@ -484,6 +484,8 @@ async function fetchExportProfilesByIds(profileIds: number[]) {
       active_experience_company_name?: string | null;
       total_experience_duration_months?: number | null;
       skills: Set<string>;
+      salesql_emails: SalesqlEmailRow[];
+      salesql_phones: SalesqlPhoneRow[];
     }
   >();
   const experiencesById = new Map<number, ExperienceDateRow[]>();
@@ -501,6 +503,8 @@ async function fetchExportProfilesByIds(profileIds: number[]) {
           p.location_full,
           p.linkedin_url,
           p.summary,
+          p.salesql_emails,
+          p.salesql_phones,
           s.skill_name
         FROM linkedin.profiles p
         LEFT JOIN linkedin.profile_skills s
@@ -549,6 +553,8 @@ async function fetchExportProfilesByIds(profileIds: number[]) {
           active_experience_company_name: undefined,
           total_experience_duration_months: undefined,
           skills: new Set<string>(),
+          salesql_emails: Array.isArray(row.salesql_emails) ? row.salesql_emails : [],
+          salesql_phones: Array.isArray(row.salesql_phones) ? row.salesql_phones : [],
         };
         profilesById.set(id, profile);
       }
@@ -904,16 +910,33 @@ export async function listTopCompanyProfiles(req: Request, res: Response) {
 type SalesqlEmailRow = { email?: string; type?: string; status?: string };
 type SalesqlPhoneRow = { phone?: string; type?: string; country_code?: string };
 
-function formatSalesqlEmails(emails: SalesqlEmailRow[]): string {
-  return emails
-    .map((e) => [e.email, e.type, e.status].filter(Boolean).join(" | "))
-    .join("; ");
+function buildContactHeaders(maxEmails: number, maxPhones: number): string[] {
+  const headers: string[] = [];
+  for (let i = 1; i <= maxEmails; i++) {
+    headers.push(`email_id_${i}`, `email_validation_${i}`);
+  }
+  for (let i = 1; i <= maxPhones; i++) {
+    headers.push(`phone_${i}`, `phone_type_${i}`, `phone_country_${i}`);
+  }
+  return headers;
 }
 
-function formatSalesqlPhones(phones: SalesqlPhoneRow[]): string {
-  return phones
-    .map((p) => [p.phone, p.type, p.country_code].filter(Boolean).join(" | "))
-    .join("; ");
+function buildContactCells(
+  emails: SalesqlEmailRow[],
+  phones: SalesqlPhoneRow[],
+  maxEmails: number,
+  maxPhones: number
+): string[] {
+  const cells: string[] = [];
+  for (let i = 0; i < maxEmails; i++) {
+    const e = emails[i];
+    cells.push(e?.email ?? "", e?.status ?? "");
+  }
+  for (let i = 0; i < maxPhones; i++) {
+    const p = phones[i];
+    cells.push(p?.phone ?? "", p?.type ?? "", p?.country_code ?? "");
+  }
+  return cells;
 }
 
 async function fetchSalesqlExportProfilesByIds(profileIds: number[]) {
@@ -1019,16 +1042,13 @@ export async function downloadProfilesCsv(req: Request, res: Response) {
     if (downloadType === "salesql") {
       const rows = await fetchSalesqlExportProfilesByIds(profileIds);
 
+      const maxEmails = rows.reduce((m, r) => Math.max(m, r.salesql_emails.length), 0);
+      const maxPhones = rows.reduce((m, r) => Math.max(m, r.salesql_phones.length), 0);
+
       const header = [
-        "profile_id",
-        "full_name",
-        "headline",
-        "location_full",
-        "total_experience",
-        "current_experience",
-        "linkedin_url",
-        "emails",
-        "phones",
+        "profile_id", "full_name", "headline", "location_full",
+        "total_experience", "current_experience", "linkedin_url",
+        ...buildContactHeaders(maxEmails, maxPhones),
       ];
 
       const csvRows = rows.map((row) =>
@@ -1040,8 +1060,7 @@ export async function downloadProfilesCsv(req: Request, res: Response) {
           formatDuration(row.total_experience_duration_months),
           formatCurrentExperience(row),
           row.linkedin_url ?? "",
-          formatSalesqlEmails(row.salesql_emails),
-          formatSalesqlPhones(row.salesql_phones),
+          ...buildContactCells(row.salesql_emails, row.salesql_phones, maxEmails, maxPhones),
         ]
           .map(escapeCsvCell)
           .join(",")
@@ -1057,16 +1076,14 @@ export async function downloadProfilesCsv(req: Request, res: Response) {
     const rows = await fetchExportProfilesByIds(profileIds);
     const rowById = new Map(rows.map((row) => [Number(row.id), row]));
 
+    const maxEmails = rows.reduce((m, r) => Math.max(m, r.salesql_emails.length), 0);
+    const maxPhones = rows.reduce((m, r) => Math.max(m, r.salesql_phones.length), 0);
+
     const header = [
-      "profile_id",
-      "full_name",
-      "headline",
-      "location_full",
-      "total_experience",
-      "current_experience",
-      "linkedin_url",
-      "summary",
-      "skills",
+      "profile_id", "full_name", "headline", "location_full",
+      "total_experience", "current_experience", "linkedin_url",
+      "summary", "skills",
+      ...buildContactHeaders(maxEmails, maxPhones),
     ];
 
     const csvRows = profileIds
@@ -1084,6 +1101,7 @@ export async function downloadProfilesCsv(req: Request, res: Response) {
           row.linkedin_url ?? "",
           row.summary ?? "",
           row.skills ?? "",
+          ...buildContactCells(row.salesql_emails, row.salesql_phones, maxEmails, maxPhones),
         ]
           .map(escapeCsvCell)
           .join(",");
